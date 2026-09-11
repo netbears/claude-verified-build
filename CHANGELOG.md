@@ -30,7 +30,11 @@ Gone from the result: `failed_verification`, `implementation[].verified` / `.pro
 (`implementation` is now the raw implementer reports), `patch_rounds[].patched[].verify`,
 `models.verify`, `stage:'verify'`, and the `verify` / `patch_verify` rows of the cost
 profile — an estimate for the same plan is correspondingly lower. Within a patch group the
-next patcher starts when the previous one finishes, not when its verifier does. 66 tests.
+next patcher starts when the previous one finishes, not when its verifier does.
+
+**Every lane is timed.** The result carries `timing`: the run's wall clock, agent-seconds per
+phase, and one entry per lane; the log prints each lane's seconds as it finishes. The front
+half had never been measured, so the next cut can be argued from a number. 68 tests.
 
 ## v1.2.0 — 2026-09-11
 
