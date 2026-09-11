@@ -463,11 +463,14 @@ Spend is **context size x number of calls** — cache reads are ~99% of real tok
 consumption and output is <1%. So the only question that matters is *which model's
 meter the repeated context re-reads land on*:
 
-| | input | output | cache read (~0.1x input) |
+| USD per Mtok | input | output | cache read (~0.1x input) |
 |---|---|---|---|
-| Fable 5 | $10 /Mtok | $50 /Mtok | $1.00 /Mtok |
-| Opus 5 | $5 /Mtok | $25 /Mtok | $0.50 /Mtok |
-| Sonnet 5 | $2 /Mtok | $10 /Mtok | **$0.20 /Mtok** |
+| Fable 5 | 10 | 50 | 1.00 |
+| Opus 5 | 5 | 25 | 0.50 |
+| Sonnet 5 | 2 | 10 | **0.20** |
+
+(Written without a dollar sign on purpose: the skill loader substitutes `$0` and `$1`
+with the invocation's argument words, so `$1.00` would render as garbage.)
 
 The implement lane is where the volume is — read, edit, run tests, re-read — so it
 goes on Sonnet, making those re-reads 5x cheaper than Fable and 2.5x cheaper than
@@ -476,7 +479,7 @@ on Sonnet too: it is mechanical discovery, and it *saves* money by establishing 
 once that every later agent would otherwise pay to rediscover.
 
 A real run, as measured over the six runs above, is **30-60 agents, hundreds of
-millions of cached-read tokens, and roughly $75-250 at list rates** for a plan of five
+millions of cached-read tokens, and roughly USD 75-250 at list rates** for a plan of five
 to twelve tasks (the front half — spec, plan, their reviews — adds to that and was not
 yet measured when this was written; the cost gate labels those rows as assumptions).
 The same work done step-by-step in one premium-model session is not cheaper: a single
