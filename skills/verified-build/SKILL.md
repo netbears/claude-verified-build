@@ -1,13 +1,46 @@
 ---
 name: verified-build
-description: Run a multi-agent build where Sonnet writes the code in parallel waves of 15, Opus verifies every commit against the real diff and re-runs the repo's own checks, Opus then adversarially reviews the combined diff, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly". Not for one-line fixes.
+description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Opus writes the spec, adversarially reviews it and folds the findings in, then writes the implementation plan, reviews and folds that in; then Sonnet writes the code in parallel waves of 15, Opus verifies every commit against the real diff and re-runs the repo's own checks, Opus adversarially reviews the combined diff, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
 ---
 
-# /verified-build — write it cheap, verify it independently, then attack it
+# /verified-build — spec it, plan it, write it cheap, verify it independently, then attack it
 
-Sonnet implements. Opus verifies. Opus attacks. Sonnet patches what matters. Opus re-attacks.
+Opus writes the spec and attacks it. Opus writes the plan and attacks it. Sonnet
+implements. Opus verifies. Opus attacks. Sonnet patches what matters. Opus re-attacks.
 Nothing is called done because the model that wrote it said so — and what the last
 pass leaves standing is yours to close by hand, not a second round's.
+
+## Where a run can start
+
+| `from` | `task` is | the engine does |
+|---|---|---|
+| `idea` (default) | a paragraph, a prompt, a failing test, a one-line idea | spec → spec review → fold-in → plan → plan review → fold-in → slice → build |
+| `spec` | a finished spec: its path, or its text | plan → plan review → fold-in → slice → build |
+| `plan` | a finished, already-reviewed plan: its path, or its text | slice → build (this week's shape) |
+
+Every document the engine writes is **committed on the branch** as it goes, in the
+repo's own naming (`docs/specs/YYYY-MM-DD-<slug>.md` and `docs/plans/…` unless Recon
+finds a different convention or you pass `specDir` / `plansDir`). Each gets one
+adversarial review round (`docRounds`) by an Opus reviewer that must bring evidence —
+for a plan, that means opening every cited line range, compiling every code block and,
+where cheap, splicing a task into a scratch worktree — and one fold-in pass by an Opus
+author that verifies each finding before acting on it and refutes with evidence what
+does not hold.
+
+**There is no human in the loop while it runs.** A spec writer with a question does
+not stop; it decides, the way a careful colleague would, and records every such choice
+in a "Decisions taken without the owner" table. Those decisions come back in the result
+as `documents.decisions` and are the **first thing you report**, because they are the
+owner's to overturn. The plan may not silently reverse one; a reviewer who tries is
+refuted on that ground.
+
+The stages carry the superpowers skills' doctrine, copied into the engine so the pair
+stays self-contained (MIT, Jesse Vincent): brainstorming for the spec writer,
+writing-plans for the plan writer, the spec and plan reviewer templates sharpened with
+what this week's reviews caught, receiving-code-review for the fold-in authors, TDD
+plus verification-before-completion for implementers, systematic-debugging for
+patchers, and the code-reviewer calibration for every judge. Only the interactive parts
+were adapted: there is no approval gate and nobody to ask.
 
 This skill is the entry point; the engine it drives is the saved workflow
 `build-verify-patch` (`$CLAUDE_CONFIG_DIR/workflows/build-verify-patch.js`). Deliberately
@@ -117,13 +150,19 @@ Workflow({
 })
 ```
 
-`task` is the only required arg. Write it properly — the planner, every
-implementer and the adversary all read it, and the adversary treats it as **the bar
-the work must clear**, so a requirement you leave out is a requirement nobody checks.
+`task` is the only required arg. From an idea, write it the way you would brief a
+good colleague: what it is for, what must not change, what "done" looks like, and any
+decision you have already made — a decision you state is one the spec writer will not
+have to take for you. The spec writer, the plan writer, the slicer and every adversary
+read it, and the code adversary treats it as **the bar the work must clear**.
 
 | arg | default | meaning |
 |---|---|---|
-| `task` | — | required; the whole ask |
+| `task` | — | required; the idea, the spec or the plan — text or a path, see `from` |
+| `from` | `idea` | `idea` \| `spec` \| `plan`: where the run starts |
+| `docRounds` | `1` | adversarial review + fold-in rounds per document the engine writes (0 = write, no review; max 2) |
+| `specDir` / `plansDir` | repo convention, else `docs/specs` / `docs/plans` | where the engine writes its documents |
+| `spec` / `plan` | — | the path of an existing document when `from` is `spec` or `plan` and `task` is not itself that path |
 | `testCmd` | discovered by Recon | exact command every lane runs; overrides discovery |
 | `wave` | `15` | max agents live at once: parallel groups while implementing, parallel verifiers after (capped at 16, and by the runtime's own `min(16, cpus-2)`) |
 | `maxSlices` | `15` | max parallel slices the planner may cut (capped at 20) |
@@ -153,6 +192,13 @@ describing it as a failed build.
 
 Otherwise the return value is structured. Report these, and in this order:
 
+0. **`documents.decisions`** — every decision the spec or plan writer took because
+   there was no owner to ask, with its question and reason; and `documents.spec_path`
+   / `documents.plan_path`, committed on the branch, plus each document's reviews and
+   fold-ins (`spec_reviews`, `plan_reviews`: findings, what was folded, what was
+   refuted and why). Report the decisions **before** anything about the code — a
+   build on a decision the owner would have made differently is a wrong build,
+   however clean. Where `from` was `plan` this block is empty.
 1. **`final_review.clean`** — the headline. `true` means the last adversarial pass
    found nothing meeting its bar. **Anything else means the work is not clean**, and
    you must say so plainly rather than leading with what got fixed.

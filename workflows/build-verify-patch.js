@@ -1,10 +1,14 @@
 export const meta = {
   name: 'build-verify-patch',
-  description: 'Sonnet implements in waves of 15, Opus verifies every commit, Opus adversarially reviews the combined diff, then one patch round for critical/major findings',
+  description: 'From an idea: Opus writes the spec, adversarially reviews and folds it in, writes the plan, reviews and folds that in; then Sonnet implements in waves of 15, Opus verifies every commit, Opus adversarially reviews the combined diff, and one patch round closes critical/major findings',
   whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix.',
   phases: [
     { title: 'Recon', detail: 'sonnet reads the repo: git state, ecosystem, how it verifies itself', model: 'sonnet' },
-    { title: 'Plan', detail: 'opus splits the task into file-disjoint slices', model: 'opus' },
+    { title: 'Spec', detail: 'opus turns the idea into a spec (brainstorming doctrine), commits it', model: 'opus' },
+    { title: 'Spec review', detail: 'opus adversarially reviews the spec; opus folds the findings in', model: 'opus' },
+    { title: 'Plan', detail: 'opus writes the implementation plan from the spec (writing-plans doctrine), commits it', model: 'opus' },
+    { title: 'Plan review', detail: 'opus adversarially reviews the plan against the tree; opus folds the findings in', model: 'opus' },
+    { title: 'Slice', detail: 'opus maps the plan\'s tasks onto file-disjoint slices', model: 'opus' },
     { title: 'Implement', detail: 'sonnet writes and commits each slice', model: 'sonnet' },
     { title: 'Verify', detail: 'opus re-runs the repo\'s checks and reads the real diff', model: 'opus' },
     { title: 'Review', detail: 'opus adversarially reviews the combined diff', model: 'opus' },
@@ -34,6 +38,20 @@ const MAX_ROUNDS = Number.isInteger(input.maxRounds) ? Math.max(0, Math.min(inpu
 // in `open_findings` (and per round in `handed_off`). Minor findings were ~40% of what
 // got patched and the place patchers most often drifted into inventing things.
 const PATCH_SEVERITY = ['critical', 'major', 'minor'].includes(input.patchSeverity) ? input.patchSeverity : 'major'
+// Where the run starts. 'idea': task is a paragraph, a prompt, a test, an idea — the engine
+// writes the spec and the plan itself. 'spec': task is (or names the path of) a finished spec —
+// skip straight to the plan. 'plan': task is (or names) a finished, reviewed plan — slice it.
+const FROM = ['idea', 'spec', 'plan'].includes(input.from) ? input.from : 'idea'
+// Adversarial review rounds on each document the engine writes (0 = write, do not review).
+const DOC_ROUNDS = Number.isInteger(input.docRounds) ? Math.max(0, Math.min(input.docRounds, 2)) : 1
+// Where the documents go; Recon reports the repo's own convention when it has one, and these
+// override it. Empty means "use the repo's convention, else docs/specs and docs/plans".
+const SPEC_DIR_IN = String(input.specDir || '').trim()
+const PLANS_DIR_IN = String(input.plansDir || '').trim()
+// Optional: a finished spec or plan path when FROM is 'spec' or 'plan' and the task text is
+// not itself the path.
+const SPEC_PATH_IN = String(input.spec || '').trim()
+const PLAN_PATH_IN = String(input.plan || '').trim()
 const MAX_SLICES = Number(input.maxSlices) > 0 ? Math.min(Number(input.maxSlices), 20) : 15
 const MAX_PATCH_PER_ROUND = 15
 const CODER = 'sonnet'
@@ -151,6 +169,8 @@ const RECON_SCHEMA = {
     has_executable_checks: { type: 'boolean', description: 'True if at least one verify_command actually ran. This decides whether verification can execute or only read.' },
     layout_notes: { type: 'string', description: 'Where source, tests and config live; anything this repo does unusually that an implementer would otherwise trip over.' },
     conventions: { type: 'string', description: 'Stated conventions from CLAUDE.md / AGENTS.md / CONTRIBUTING.md worth passing on verbatim, including any worktree or commit-trailer rules.' },
+    today: { type: 'string', description: 'Today\'s date as `date -I` prints it (YYYY-MM-DD). The engine cannot read a clock; documents are named with this.' },
+    docs_layout: { type: 'string', description: 'Where this repo keeps specs and plans if it has a convention (e.g. "specs: docs/specs, plans: docs/plans, named YYYY-MM-DD-<slug>.md"), and how the last few were named; empty if it has none.' },
   },
 }
 
@@ -403,6 +423,113 @@ function severityRank(sev) {
   return 2
 }
 
+
+// ---------------------------------------------------------------------------
+// Doctrine embedded per role. Copied from the superpowers skills (MIT, Jesse
+// Vincent), adapted only where a stage has no human to ask: the spec writer
+// must DECIDE and record instead of asking, and there is no approval gate.
+// Embedded rather than invoked by name so the pair stays self-contained — an
+// install without the plugin behaves identically.
+// ---------------------------------------------------------------------------
+const DOCTRINE_BRAINSTORM = "DOCTRINE FOR THIS STAGE (from the superpowers `brainstorming` skill, adapted for a run with no human to ask):\n\nHelp turn an idea into a fully formed design and spec. Classify the request first and say the\nclassification in the spec: a SPIKE (a feasibility question whose output is an answer, not code to\nkeep), a BOUNDED change (a well-scoped change to a flow that already exists in this repo \u2014 bounded\nmeasures the repo, not your familiarity with the kind of app), or ARCHITECTURAL (a new subsystem, a\nchange that restructures how components fit or alters interfaces others depend on). When in doubt,\ntake the heavier path; hidden complexity discovered mid-way upgrades the path, never downgrades it.\n\"Too simple to need a design\" is the thought that wastes the most work: simple means a short design,\nnot no design.\n\nUnderstanding the idea:\n- Check the current project state first: files, docs, recent commits, the conventions it states.\n- Assess scope before detail. If the request describes several independent subsystems, decompose:\n  name the independent pieces, how they relate, what order they should be built in, and write THIS\n  spec for the first sub-project only; list the rest under \"Out of scope, next specs\".\n- Focus on purpose, constraints, success criteria.\n- There is NO human partner in this run. Every question you would have asked, you must answer\n  yourself: pick the answer a careful colleague would pick, and record every such choice in a\n  section titled \"Decisions taken without the owner\", one row each \u2014 the question, the decision,\n  why \u2014 so the owner can overturn any of them by reading that one section. Never leave a TBD.\n\nExploring approaches:\n- Propose two or three approaches with trade-offs; lead with your recommendation and why.\n- YAGNI ruthlessly: remove unnecessary features from every approach and from the design.\n\nPresenting the design (in the spec):\n- Cover architecture, components, data flow, error handling, testing. Scale each section to its\n  complexity: a few sentences if straightforward, a few hundred words if nuanced.\n- Design for isolation and clarity: units with one purpose, well-defined interfaces, understandable\n  and testable independently. For each unit: what does it do, how do you use it, what does it depend on.\n- In an existing codebase, follow its patterns. Include targeted improvements only where an existing\n  problem affects THIS work; propose no unrelated refactoring.\n\nSpec self-review before you finish (fix inline, no re-review needed):\n1. Placeholder scan: any TBD, TODO, incomplete section or vague requirement \u2014 fix it.\n2. Internal consistency: do sections contradict each other; does the architecture match the features.\n3. Scope check: focused enough for one implementation plan, or does it need decomposition.\n4. Ambiguity check: could a requirement be read two ways \u2014 pick one and make it explicit.\n"
+const DOCTRINE_WRITING_PLANS = "DOCTRINE FOR THIS STAGE (from the superpowers `writing-plans` skill):\n\nWrite a comprehensive implementation plan assuming the engineer has zero context for this codebase\nand questionable taste. Document everything they need: which files to touch for each task, the code,\nthe tests, the docs they might need to check, how to test it. Bite-sized tasks. DRY. YAGNI. TDD.\nFrequent commits. Assume a skilled developer who knows almost nothing about this toolset or problem\ndomain and does not know good test design well.\n\nScope check: if the spec covers several independent subsystems, the plan covers the first and says so.\n\nFile structure first: before defining tasks, map which files are created or modified and what each is\nresponsible for \u2014 this is where decomposition is locked in. Units with clear boundaries and interfaces;\nsmaller focused files over large ones; files that change together live together; in an existing\ncodebase follow its patterns.\n\nTask right-sizing: a task is the smallest unit that carries its own test cycle and is worth a fresh\nreviewer's gate. Fold setup, configuration, scaffolding and documentation into the task whose\ndeliverable needs them; split only where a reviewer could reject one task while approving its\nneighbour. Each task ends with an independently testable deliverable. Each STEP is one action of two\nto five minutes: write the failing test; run it and watch it fail; write the minimal implementation;\nrun it and watch it pass; commit.\n\nThe plan MUST start with this header:\n\n# [Feature Name] Implementation Plan\n\n> **For agentic workers:** this plan is executed by the verified-build engine, one task per slice,\n> each slice implemented by a fresh agent and verified by a different model. Steps use `- [ ]` syntax.\n\n**Goal:** [one sentence]\n**Architecture:** [two or three sentences]\n**Tech Stack:** [key technologies]\n**Spec:** [path \u2014 the plan argues from the spec, so the spec travels with it]\n\n## Global Constraints\n[The spec's project-wide requirements, one line each, exact values copied verbatim. Every task's\nrequirements implicitly include this section.]\n\nThen a \"## File map\" (created / modified / deleted, one line per file with its responsibility) and a\n\"## File-overlap table\" (for every file two or more tasks touch: the tasks, in order \u2014 the engine\nserialises those tasks, so keep chains short and prefer merging a chain longer than four into fewer,\nlarger tasks).\n\nEach task has this structure:\n\n### Task N: [Component Name]\n**Files:** Create / Modify (`exact/path.py:123-145`, measured with grep -n or sed -n on the CURRENT\ntree, never estimated) / Test.\n**Interfaces:** Consumes (what this task uses from earlier tasks \u2014 exact signatures) / Produces (what\nlater tasks rely on \u2014 exact names, parameter and return types; an implementer sees only its own task).\n- [ ] **Step 1: Write the failing test** \u2014 the real test code, in a fenced block.\n- [ ] **Step 2: Run it to verify it fails** \u2014 the exact command and the expected failure.\n- [ ] **Step 3: Write the minimal implementation** \u2014 the real code, in a fenced block.\n- [ ] **Step 4: Run it to verify it passes** \u2014 the exact command.\n- [ ] **Step 5: Run the repo's own check** and **commit** \u2014 the exact commit message in the repo's convention.\n\nNo placeholders. These are plan failures, never write them: \"TBD\", \"TODO\", \"implement later\", \"add\nappropriate error handling\", \"add validation\", \"handle edge cases\", \"write tests for the above\" without\nthe test code, \"similar to Task N\" (repeat the code), steps that describe without showing (code blocks\nare required for code steps), references to names not defined in any task.\n\nSelf-review after writing (fix inline, then stop):\n1. Spec coverage: every requirement in the spec points to a task that implements it; add tasks for gaps.\n2. Placeholder scan: search the plan for every pattern above.\n3. Type consistency: names, signatures and property names used in later tasks match what earlier\n   tasks defined.\n"
+const DOCTRINE_TDD = "DOCTRINE (from the superpowers `test-driven-development` and `verification-before-completion` skills):\n\nThe iron law: NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST. Write one minimal test showing what\nshould happen; run it and WATCH IT FAIL, for the expected reason (feature missing, not a typo \u2014 a test\nthat passes immediately is testing existing behaviour, fix the test); write the simplest code that\npasses; run it and watch it pass with the other tests still green and the output pristine; refactor\nonly after green, adding no behaviour. Wrote code before the test? Delete it and start from the test.\nGood tests: one behaviour each, a name that describes the behaviour, real code rather than mocks\nunless a mock is unavoidable, asserting on behaviour rather than on the mock. Name, before writing a\ntest, the production change that would make it fail. Keep test-only code in test utilities, never in\nproduction classes. Where the repo's only checks are lint/validate/build, those are the red and green.\n\nEvidence before claims, always: NO COMPLETION CLAIM WITHOUT FRESH VERIFICATION EVIDENCE. Before you\nreport any status: identify the command that proves it, run the FULL command fresh, read the whole\noutput and the exit code, and only then make the claim \u2014 with the evidence. \"Should pass\", \"looks\ncorrect\", \"I'm confident\", a previous run, a partial run: none of these is evidence. A regression test\nis proven by red-green: it must fail on the old code and pass on the new. Requirements are met when you\nre-read the task, make a checklist, and verify each line, not when the tests pass.\n"
+const DOCTRINE_DEBUG = "DOCTRINE (from the superpowers `systematic-debugging` skill, plus TDD and verification):\n\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST. Phase 1, root cause: read the error and the finding's\nfailure_scenario completely; reproduce it (a failing test, or a one-off script if the repo has no test\nframework); check what changed recently (git log, git diff); in a multi-component path add evidence at\neach boundary and see WHERE it breaks; trace a bad value back to where it originates and fix at the\nsource, not the symptom. Phase 2, pattern: find working examples of the same shape in this codebase,\nread the reference completely, list every difference. Phase 3, hypothesis: state ONE specific hypothesis,\nmake the smallest change that tests it, one variable at a time; if it did not work form a new\nhypothesis rather than stacking fixes. Phase 4, implement: a failing test that reproduces the finding\nFIRST, then one fix at the root cause, no \"while I'm here\" improvements, no bundled refactoring; then\nverify \u2014 the new test passes, no other test broke, the scenario is actually resolved. If three fixes\nhave failed, stop: the pattern is architectural, report it as disputed-with-evidence rather than\nattempting a fourth. Under time pressure the process is faster than guessing, not slower.\n\nEvidence before claims, always: identify the command that proves the fix, run it in full, read the\noutput, and only then claim it. A regression test is proven by red-green: revert the fix and watch it\nfail, restore it and watch it pass.\n"
+const DOCTRINE_REVIEW_CALIBRATION = "CALIBRATION (from the superpowers code-reviewer template): categorise by ACTUAL severity \u2014 not\neverything is critical. Be specific (file:line, not vague), explain WHY each issue matters and how to\nfix it if not obvious, and give a clear verdict. Never say \"looks good\" without checking, never mark a\nnitpick critical, never report on code you did not read, never be vague (\"improve error handling\"). If a\ndeviation from the plan looks intentional, say so as a deviation rather than a defect; if the plan\nitself is wrong, say that. Your review is read-only on this checkout: never mutate the working tree,\nthe index, HEAD or branch state; if you need another revision, use a separate `git worktree` in a\ntemporary directory. Do the whole review yourself: never spawn a subagent to review part of it.\n"
+const DOCTRINE_RECEIVING = "DOCTRINE FOR FOLDING IN A REVIEW (from the superpowers `receiving-code-review` skill):\n\nReview feedback needs technical evaluation, not performance. For each finding: READ it completely;\nrestate the requirement in your own words; VERIFY it against the document and the codebase; EVALUATE\nwhether it is right for THIS repo; then RESPOND \u2014 fold it in, or refute it with technical reasoning and\nconcrete evidence (a command you ran, a line you read). Never fold in a finding you have not verified;\nnever refuse one merely because it is inconvenient. Push back when the finding breaks something that\nexists, lacks context the document states, violates YAGNI, or contradicts a decision the owner already\nrecorded \u2014 and in that last case leave the owner's decision standing and say why. Fold in one finding at\na time; keep the document consistent after each (a change in one section usually has echoes in the\nFile map, the overlap table, the self-review and the tests). No gratitude, no \"you're absolutely\nright\": state what changed. Record the disposition of every finding, folded or refuted, in a fold-in\nsection at the end of the document.\n"
+
+const SPEC_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['path', 'slug', 'classification', 'title', 'summary', 'decisions', 'commit_sha'],
+  properties: {
+    path: { type: 'string', description: 'Repo-relative path of the spec file you wrote and committed.' },
+    slug: { type: 'string', description: 'The kebab-case slug used in the file name, e.g. armable-plans-one-predicate.' },
+    classification: { type: 'string', enum: ['spike', 'bounded', 'architectural'] },
+    title: { type: 'string' },
+    summary: { type: 'string', description: 'At most ~150 words: what the spec decides and why. The orchestrator reports this.' },
+    decisions: {
+      type: 'array',
+      description: 'Every question you would have asked a human and answered yourself instead. The owner reads this list to overturn any of them.',
+      items: {
+        type: 'object', additionalProperties: false, required: ['question', 'decision', 'why'],
+        properties: { question: { type: 'string' }, decision: { type: 'string' }, why: { type: 'string' } },
+      },
+    },
+    out_of_scope: { type: 'array', items: { type: 'string' }, description: 'Sub-projects or requirements deliberately left for a later spec.' },
+    commit_sha: { type: 'string' },
+  },
+}
+
+const DOC_REVIEW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['status', 'findings', 'summary'],
+  properties: {
+    status: { type: 'string', enum: ['approved', 'issues_found'] },
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['id', 'severity', 'where', 'claim', 'evidence', 'fix'],
+        properties: {
+          id: { type: 'string', description: 'F1, F2, …' },
+          severity: { type: 'string', enum: ['critical', 'major', 'minor'] },
+          where: { type: 'string', description: 'The section, task or step the finding is about.' },
+          claim: { type: 'string', description: 'What is wrong, specifically.' },
+          evidence: { type: 'string', description: 'What you ran or read that shows it: a command and its output, a file:line, a contradiction quoted from the document.' },
+          fix: { type: 'string', description: 'What the document should say instead.' },
+        },
+      },
+    },
+    recommendations: { type: 'array', items: { type: 'string' }, description: 'Advisory; never blocks.' },
+    summary: { type: 'string' },
+  },
+}
+
+const FOLD_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['folded', 'refuted', 'commit_sha', 'summary'],
+  properties: {
+    folded: { type: 'array', items: { type: 'string' }, description: 'Finding ids you folded into the document.' },
+    refuted: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['id', 'evidence'],
+        properties: { id: { type: 'string' }, evidence: { type: 'string', description: 'The concrete evidence that refutes it.' } },
+      },
+    },
+    commit_sha: { type: 'string', description: 'The commit that carries the fold-in; empty if nothing changed.' },
+    summary: { type: 'string' },
+  },
+}
+
+const PLANDOC_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['path', 'title', 'tasks', 'commit_sha'],
+  properties: {
+    path: { type: 'string', description: 'Repo-relative path of the plan file you wrote and committed.' },
+    title: { type: 'string' },
+    tasks: {
+      type: 'array', minItems: 1,
+      description: 'One entry per "### Task N" section, in order, as the file now stands.',
+      items: {
+        type: 'object', additionalProperties: false, required: ['n', 'title', 'files', 'lines'],
+        properties: {
+          n: { type: 'integer' },
+          title: { type: 'string' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Every file the task creates or modifies, repo-relative.' },
+          lines: { type: 'string', description: 'The task section\'s line range in the plan file, e.g. "94-492", measured with grep -n after your last edit.' },
+        },
+      },
+    },
+    global_constraints_lines: { type: 'string', description: 'Line range of the "## Global Constraints" section, e.g. "25-39".' },
+    commit_sha: { type: 'string' },
+  },
+}
+
 // ---------------------------------------------------------------------------
 // Phase 0 — Recon. Establishes, ONCE, the three things that used to be either
 // assumed or rediscovered N times: that this is a safe git repo to commit into,
@@ -449,6 +576,10 @@ const recon = await callAgent(
     '   Capture anything an implementer would otherwise waste three tool calls rediscovering,',
     '   and quote any hard rules verbatim — especially worktree requirements, commit message',
     '   or trailer rules, and files that must not be touched.',
+    '',
+    '5. DATE AND DOCUMENTS. Run `date -I` and report it as `today`. Look for where this repo keeps',
+    '   design specs and implementation plans (docs/specs, docs/plans, docs/superpowers/…, a docs/',
+    '   README) and how the most recent ones are named; report that in `docs_layout`, or empty.',
   ].join('\n'),
   { label: 'recon', phase: 'Recon', model: CODER, effort: EFFORT, schema: RECON_SCHEMA }
 )
@@ -510,17 +641,239 @@ if (Array.isArray(recon.verify_commands) && recon.verify_commands.length > 1) {
   log('other checks available: ' + recon.verify_commands.slice(1).map((c) => c.kind + '=' + c.command).join(' | '))
 }
 
+
 // ---------------------------------------------------------------------------
-// Phase 1 — Plan
+// The documents. Today's date and the docs layout come from Recon (the engine
+// has no clock). A document writer WRITES and COMMITS its file; a reviewer is
+// read-only and returns findings with evidence; a fold-in agent judges each
+// finding, edits the document, commits, and returns what it folded and what it
+// refuted. One review round per document by default (docRounds).
 // ---------------------------------------------------------------------------
-phase('Plan')
+const TODAY = /^\d{4}-\d{2}-\d{2}$/.test(String(recon.today || '')) ? String(recon.today) : 'undated'
+const DOCS_LAYOUT = String(recon.docs_layout || '').trim()
+const SPEC_DIR = SPEC_DIR_IN || (/(docs\/[\w./-]*specs)/.exec(DOCS_LAYOUT) || [null, 'docs/specs'])[1]
+const PLANS_DIR = PLANS_DIR_IN || (/(docs\/[\w./-]*plans)/.exec(DOCS_LAYOUT) || [null, 'docs/plans'])[1]
+const COMMIT_RULES = 'Commit in this repo\'s own convention' + (recon.conventions ? ' (its stated conventions: ' + recon.conventions.slice(0, 1500) + ')' : '') + '. Do NOT push.'
+
+const documents = { from: FROM, spec: null, spec_reviews: [], plan: null, plan_reviews: [], decisions: [] }
+
+function looksLikePath(t) {
+  return /^[\w./-]+\.md$/.test(t.trim()) && !/\s/.test(t.trim())
+}
+
+async function reviewAndFold(kind, docPath, extra) {
+  // kind: 'spec' | 'plan'. Returns the list of {review, fold} rounds.
+  const out = []
+  for (let r = 1; r <= DOC_ROUNDS; r++) {
+    phase(kind === 'spec' ? 'Spec review' : 'Plan review')
+    const review = await callAgent(
+      [
+        'You are the ADVERSARIAL REVIEWER of a ' + (kind === 'spec' ? 'design spec' : 'implementation plan') +
+        '. Your job is to REFUTE the claim that it is complete, consistent and ready for the next stage.',
+        'A clean verdict you cannot defend is worse than a false alarm; a finding without evidence is noise.',
+        '',
+        'THE DOCUMENT: ' + docPath + ' — read it whole.',
+        (extra || ''),
+        '',
+        'THE REPO: ' + (recon.ecosystem || 'unknown') + (HAS_CHECKS ? '. Check command: ' + CHECK_CMD : '. No executable checks.'),
+        (recon.conventions ? 'Conventions it documents, which a violation of IS a finding:\n' + recon.conventions : ''),
+        '',
+        (kind === 'spec'
+          ? [
+            'WHAT TO CHECK (the superpowers spec reviewer, sharpened):',
+            '- Completeness: TODOs, placeholders, TBDs, incomplete sections, a decision the document dodges.',
+            '- Consistency: internal contradictions, conflicting requirements, an architecture that does not match the features.',
+            '- Clarity: a requirement ambiguous enough that someone would build the wrong thing.',
+            '- Scope: focused enough for ONE plan; unrequested features; over-engineering (YAGNI).',
+            '- Reality: does the spec\'s account of the CURRENT code match the tree? Open the files it names and',
+            '  check every claim about them. A spec built on a wrong reading of the code produces a wrong plan.',
+            '- The "Decisions taken without the owner" section: is every decision there defensible, and is',
+            '  any decision hidden elsewhere in the text without being listed?',
+            'Calibration: flag only what would cause a flawed plan. Wording, style and "less detailed than',
+            'other sections" are not findings.',
+          ].join('\n')
+          : [
+            'WHAT TO CHECK (the superpowers plan reviewer, sharpened by what plan reviews caught this week):',
+            '- Completeness: TODOs, placeholders, incomplete tasks, missing steps, "similar to Task N".',
+            '- Spec alignment: every spec requirement maps to a task; no major scope creep; every "Global',
+            '  Constraint" copied verbatim from the spec.',
+            '- Buildability against the REAL tree — this is where plan reviews earn their keep:',
+            '    * every `Modify: path:lines` range: open the file and check the range holds the code the task edits;',
+            '    * every fenced code block: parse/compile it where the language allows (`python -m py_compile`,',
+            '      `node --check`, `tofu validate` …); a block shown in context may need a wrapper — say which;',
+            '    * every test the plan gives: do the fixtures, helpers and imports it uses exist? would its',
+            '      Step 2 really fail red, and its Step 4 really go green?',
+            '    * every Consumes/Produces signature: does the name defined in one task match its use in another?',
+            '    * the file-overlap table: does it match every task\'s Files list? are the chains short?',
+            '  Where it is cheap, splice a task into a scratch `git worktree` (a temporary directory, never this',
+            '  checkout) and run its own commands. That is the strongest evidence a plan review can produce.',
+            '- Task decomposition: clear boundaries; steps actionable; a test cycle per task.',
+            '- Sequencing: tasks in an order where each one\'s Consumes already exists.',
+            'Calibration: flag only what would cause an implementer to build the wrong thing or get stuck.',
+          ].join('\n')),
+        '',
+        DOCTRINE_REVIEW_CALIBRATION,
+        'RULES:',
+        '- Every finding carries EVIDENCE: the command you ran and what it printed, the file:line you read, the',
+        '  two sentences that contradict each other. Under uncertainty, raise it — a false positive costs one',
+        '  fold-in agent; a false negative costs a build.',
+        '- status "approved" ONLY if you read the whole document and found nothing meeting that bar.',
+        '- You do not edit the document. You do not commit.',
+        (r > 1 ? '\nThis is review round ' + r + '; the fold-in of round ' + (r - 1) + ' is already in the file.' : ''),
+      ].join('\n'),
+      { label: kind + '-review:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: DOC_REVIEW_SCHEMA }
+    )
+    if (!review) { out.push({ round: r, review: null, fold: null }); break }
+    log(kind + ' review round ' + r + ': ' + review.status + ', ' + review.findings.length + ' finding(s)')
+    if (review.status === 'approved' || review.findings.length === 0) { out.push({ round: r, review, fold: null }); break }
+
+    const fold = await callAgent(
+      [
+        'You are the AUTHOR folding an adversarial review into your ' + (kind === 'spec' ? 'spec' : 'plan') + '.',
+        '',
+        'THE DOCUMENT: ' + docPath,
+        (extra || ''),
+        '',
+        'THE FINDINGS:',
+        JSON.stringify(review.findings, null, 2),
+        (review.recommendations && review.recommendations.length ? '\nADVISORY (fold in only if clearly right): ' + review.recommendations.join(' | ') : ''),
+        '',
+        DOCTRINE_RECEIVING,
+        'RULES:',
+        '- Verify each finding against the document and the tree before you act on it. Fold in the ones that',
+        '  hold; refute the ones that do not, with the concrete evidence, and leave the text as it was.',
+        '- The owner\'s recorded decisions (' + (kind === 'spec' ? 'the "Decisions taken without the owner" section' : 'the spec\'s decisions, which the plan must not silently reverse') + ')',
+        '  outrank a reviewer. A finding that would reverse one is refuted on that ground, and reported.',
+        '- Keep the document whole and consistent after every fold-in: file map, overlap table, self-review,',
+        '  line ranges (re-measure them), test names. No placeholders may appear as a result of a fold-in.',
+        '- Append a "## Fold-in record (review round ' + r + ')" section: a table of every finding id, verdict',
+        '  (folded / refuted) and what changed or why not.',
+        '- ' + COMMIT_RULES,
+      ].join('\n'),
+      { label: kind + '-fold:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: FOLD_SCHEMA }
+    )
+    out.push({ round: r, review, fold })
+    if (!fold) break
+    log(kind + ' fold-in round ' + r + ': ' + fold.folded.length + ' folded, ' + fold.refuted.length + ' refuted')
+  }
+  return out
+}
+
+// ----- Spec ---------------------------------------------------------------
+let SPEC_PATH = SPEC_PATH_IN || (FROM === 'spec' && looksLikePath(TASK) ? TASK.trim() : '')
+if (FROM === 'idea') {
+  phase('Spec')
+  const spec = await callAgent(
+    [
+      'You are the SPEC WRITER. Turn the idea below into a design spec, write it to a file, and commit it.',
+      'You write no implementation code.',
+      '',
+      'THE IDEA:',
+      TASK,
+      '',
+      'THE REPO: ' + (recon.ecosystem || 'unknown') + ' on branch ' + (recon.branch || '?') + '.',
+      (recon.layout_notes ? 'Layout: ' + recon.layout_notes : ''),
+      (recon.conventions ? 'Conventions (binding): ' + recon.conventions : ''),
+      (DOCS_LAYOUT ? 'Documents convention: ' + DOCS_LAYOUT : ''),
+      '',
+      DOCTRINE_BRAINSTORM,
+      'OUTPUT:',
+      '- Write the spec to `' + SPEC_DIR + '/' + TODAY + '-<slug>.md` (follow the repo\'s naming where it has one).',
+      '- Structure it so a plan can be written from it alone: the problem and the evidence for it in the',
+      '  current code (cite files and lines you actually read), the decisions, the required behaviour with',
+      '  numbered sections, the claims a test can make, the effect on existing data, risks, out of scope, and',
+      '  the "Decisions taken without the owner" table.',
+      '- Any constraint from the repo (principles in CLAUDE.md, module budgets, one-writer rules, channel',
+      '  rules) that this work touches is restated in the spec, verbatim, as a hard constraint.',
+      '- ' + COMMIT_RULES,
+    ].join('\n'),
+    { label: 'spec', phase: 'Spec', model: JUDGE, effort: EFFORT, schema: SPEC_SCHEMA }
+  )
+  if (!spec) return { ok: false, stage: 'spec', error: 'the spec writer returned nothing', recon }
+  SPEC_PATH = spec.path
+  documents.spec = spec
+  documents.decisions.push(...(spec.decisions || []).map((d) => ({ stage: 'spec', ...d })))
+  log('spec: ' + spec.path + ' (' + spec.classification + ', ' + (spec.decisions || []).length + ' decision(s) taken without the owner)')
+  documents.spec_reviews = await reviewAndFold('spec', SPEC_PATH, 'THE IDEA IT CAME FROM:\n' + TASK)
+}
+
+// ----- Plan ---------------------------------------------------------------
+let PLAN_PATH = PLAN_PATH_IN || (FROM === 'plan' && looksLikePath(TASK) ? TASK.trim() : '')
+let planDoc = null
+if (FROM === 'idea' || FROM === 'spec') {
+  phase('Plan')
+  const specRef = SPEC_PATH ? 'THE SPEC: ' + SPEC_PATH + ' — read it whole; the plan argues from it.' : 'THE SPEC (inline):\n' + TASK
+  planDoc = await callAgent(
+    [
+      'You are the PLAN WRITER. Write the implementation plan for the spec below, to a file, and commit it.',
+      'You write no implementation code — but every code block the plan gives must be real, complete code,',
+      'measured against the CURRENT tree.',
+      '',
+      specRef,
+      '',
+      'THE REPO: ' + (recon.ecosystem || 'unknown') + ' on branch ' + (recon.branch || '?') + '.',
+      (HAS_CHECKS ? 'Check command: ' + CHECK_CMD : 'No executable checks — say so in Global Constraints.'),
+      (recon.layout_notes ? 'Layout: ' + recon.layout_notes : ''),
+      (recon.conventions ? 'Conventions (binding): ' + recon.conventions : ''),
+      (DOCS_LAYOUT ? 'Documents convention: ' + DOCS_LAYOUT : ''),
+      '',
+      DOCTRINE_WRITING_PLANS,
+      'HOW THIS PLAN WILL BE EXECUTED, which shapes it:',
+      '- One task = one slice = one fresh implementer agent that reads ONLY its task section, the Global',
+      '  Constraints and a short shared context. So a task must be complete in itself: files with measured',
+      '  line ranges, exact Consumes/Produces, the failing test as real code, the implementation as real code,',
+      '  the exact commands, the commit message.',
+      '- Tasks that touch a common file run one after another. Keep such chains at four or fewer; merge',
+      '  where a chain would be longer. Prefer tasks that are file-disjoint.',
+      '- A different model re-runs the repo\'s check on every commit and reads the real diff; a third pass',
+      '  attacks the whole. Write the plan so those judges have something exact to hold the work to.',
+      '',
+      'OUTPUT:',
+      '- Write to `' + PLANS_DIR + '/' + TODAY + '-<slug>.md`' + (SPEC_PATH ? ' (same slug as the spec).' : '.'),
+      '- ' + COMMIT_RULES,
+      '- Report every task with its files and its line range in the file AFTER your final edit (grep -n).',
+    ].join('\n'),
+    { label: 'plan-doc', phase: 'Plan', model: JUDGE, effort: EFFORT, schema: PLANDOC_SCHEMA }
+  )
+  if (!planDoc) return { ok: false, stage: 'plan', error: 'the plan writer returned nothing', recon, documents }
+  PLAN_PATH = planDoc.path
+  documents.plan = planDoc
+  log('plan: ' + planDoc.path + ' (' + planDoc.tasks.length + ' task(s))')
+  documents.plan_reviews = await reviewAndFold('plan', PLAN_PATH, (SPEC_PATH ? 'THE SPEC IT IMPLEMENTS: ' + SPEC_PATH : 'THE REQUIREMENTS:\n' + TASK))
+  // Line ranges move under a fold-in; re-measure them for the slicer.
+  const folded = documents.plan_reviews.some((r) => r.fold && r.fold.commit_sha)
+  if (folded) {
+    const remeasured = await callAgent(
+      [
+        'Read ' + PLAN_PATH + ' as it stands NOW and report every "### Task N" section in order with its files',
+        'and its line range (grep -n "^### Task" and "^## Global Constraints"; the range ends where the next',
+        'section starts). Report the commit_sha as `git rev-parse HEAD`. Do not edit anything.',
+      ].join('\n'),
+      { label: 'plan-index', phase: 'Plan review', model: CODER, effort: 'low', schema: PLANDOC_SCHEMA }
+    )
+    if (remeasured) { planDoc = remeasured; documents.plan = remeasured }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Slice — the plan's tasks become file-disjoint slices.
+// ---------------------------------------------------------------------------
+phase('Slice')
+
+const PLAN_INDEX = planDoc
+  ? 'THE PLAN DOCUMENT: ' + PLAN_PATH + '\nGlobal Constraints at lines ' + (planDoc.global_constraints_lines || '?') +
+    '\nTASKS (one slice each unless a chain must be merged):\n' +
+    planDoc.tasks.map((t) => '  Task ' + t.n + ' — ' + t.title + ' — files: ' + (t.files || []).join(', ') + ' — lines ' + t.lines).join('\n')
+  : (PLAN_PATH ? 'THE PLAN DOCUMENT: ' + PLAN_PATH + ' — read it and index its tasks yourself.' : '')
 
 const plan = await callAgent(
   [
-    'You are the PLANNER. You do not write the implementation — you split it so that several implementers can work at once without colliding.',
+    'You are the SLICER. You do not write the implementation — you map the plan\'s tasks onto slices so that several implementers can work at once without colliding.',
     '',
     'TASK:',
     TASK,
+    '',
+    PLAN_INDEX,
     '',
     'WHAT RECON ALREADY ESTABLISHED — trust this and do not re-derive it:',
     JSON.stringify({
@@ -537,7 +890,9 @@ const plan = await callAgent(
     'Do this:',
     '1. Read enough of the repo to plan honestly, building on the recon notes above rather than repeating that work.',
     '   FOLLOW whatever conventions CLAUDE.md / AGENTS.md state.',
-    '2. Split the task into at most ' + MAX_SLICES + ' slices.',
+    '2. Split the work into at most ' + MAX_SLICES + ' slices. When a plan document is given, ONE TASK = ONE SLICE',
+    '   in the plan\'s order, each slice prompt pointing at its task section by path + heading + line range; the',
+    '   only reshaping allowed is merging adjacent tasks of a serial chain longer than four.',
     '',
     'The one rule that matters: SLICES MUST BE FILE-DISJOINT. Two slices that touch the same file are run one',
     'after the other instead of at the same time. They each keep their own agent and their own verifier, so the',
@@ -632,6 +987,7 @@ function implPrompt(s, landedSiblings) {
       landedSiblings.map((d) => d.slice.id + ' (' + d.slice.title + ')').join(', ') +
       '.\nTheir work is in the tree. Build on it; do not revisit, revert or re-do it.\n'
       : ''),
+    DOCTRINE_TDD,
     'RULES:',
     '- Implement this slice and nothing else. Return exactly one entry in slice_results.',
     '- Touch only the files your slice declares. If you genuinely must touch another, do it and SAY SO in notes.',
@@ -708,6 +1064,7 @@ const results = (await wavesOne(
         '   deleted to make things pass; TODO stubs standing in for the work; commented-out assertions; except/catch',
         '   blocks that swallow the error the check was supposed to surface; a value hardcoded where it should be derived.',
         '',
+        DOCTRINE_REVIEW_CALIBRATION,
         'RULES:',
         '- Judge THIS slice only. Other slices in this run have their own verifiers; a defect that is plainly',
         '  outside your slice belongs in problems as minor, not as a verdict on work you were not given.',
@@ -740,7 +1097,8 @@ function reviewPrompt(roundLabel, extra) {
     'OVERALL TASK — this is the bar the work must clear:',
     TASK,
     '',
-    'THE PLAN THAT WAS EXECUTED:',
+    (PLAN_PATH ? 'THE PLAN DOCUMENT THE WORK MUST MATCH, task by task: ' + PLAN_PATH + (SPEC_PATH ? ' (spec: ' + SPEC_PATH + ')' : '') : ''),
+    'THE SLICES THAT WERE EXECUTED:',
     JSON.stringify(plan.slices.map((s) => ({ id: s.id, title: s.title, done_when: s.done_when })), null, 2),
     (plan.uncovered && plan.uncovered.length ? '\nThe planner already admitted leaving out: ' + plan.uncovered.join(' | ') : ''),
     '',
@@ -768,6 +1126,7 @@ function reviewPrompt(roundLabel, extra) {
     '  dropped, a hardcoded account/region/environment, a secret committed, a permission widened beyond the task,',
     '  or a change that silently destroys data on apply. Judge the diff on its own terms.',
     '',
+    DOCTRINE_REVIEW_CALIBRATION,
     'RULES:',
     '- Under uncertainty, default to raising the finding. A false positive costs one patch; a false negative ships.',
     (HAS_CHECKS
@@ -845,6 +1204,7 @@ while (
           'THE FINDING:',
           JSON.stringify(f, null, 2),
           '',
+          DOCTRINE_DEBUG,
           'RULES:',
           '- Fix this finding. Do not refactor, tidy or improve anything beyond it — a patch round is the worst',
           '  possible moment to widen scope.',
@@ -994,6 +1354,10 @@ return {
     other_checks: (recon.verify_commands || []).slice(1),
   },
   patch_policy: { max_rounds: MAX_ROUNDS, auto_patch_at_or_above: PATCH_SEVERITY },
+  // The front half: where the run started, the documents it wrote and committed, every
+  // adversarial review and fold-in of them, and — first thing to report — every decision a
+  // writer took because there was no owner to ask.
+  documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null, doc_rounds: DOC_ROUNDS },
   models: {
     implement: CODER, verify: JUDGE, review: JUDGE, effort: EFFORT, max_concurrent: WAVE,
     // Lanes whose primary model returned nothing and were re-run once on the other
