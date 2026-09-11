@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.1 — 2026-09-11
+
+Two things the first live run of the front half taught. Recon's `today` is required with a
+`YYYY-MM-DD` pattern the runtime enforces: it was optional, Recon omitted it, and the plan
+writer named its file `undated-<slug>.md` (the fallback now also logs a warning). The skill
+writes prices as `USD 1.00`: the skill loader substitutes `$0` and `$1` with the invocation's
+argument words, so `$1.00` rendered as garbage whenever the skill was invoked with arguments.
+
+The live run itself (one slice, a `stonks version` command on a Python repo, 15 agents, 54
+minutes end to end at API list prices ~USD 109 estimated): probe, recon, spec + 7 findings
+folded, plan + 3 findings folded, decision record with 35 entries, cost-gate pause and
+resume from cache, one implementer, one verifier, one adversarial pass returning three
+minors and no majors, all three closed by the orchestrator by hand. No lane errors, no
+fallbacks.
+
+
 ## v1.1.0 — 2026-09-11
 
 Every gap an adversarial review of v1.0.0 found, closed; a test suite; a model probe.
