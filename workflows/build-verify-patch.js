@@ -1,14 +1,14 @@
 export const meta = {
   name: 'build-verify-patch',
-  description: 'From an idea: Opus writes the spec, adversarially reviews and folds it in, writes the plan, reviews and folds that in; then Sonnet implements in waves of 15, Opus adversarially reviews the combined diff and re-runs the repo\'s check, and one patch round closes critical/major findings',
+  description: 'From an idea: Opus writes the spec and a second Opus reviews and folds it in; the same for the plan; then Sonnet implements in waves of 15, Opus adversarially reviews the combined diff and re-runs the repo\'s check, and one patch round closes critical/major findings',
   whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix.',
   phases: [
     { title: 'Probe', detail: 'one trivial call per model: are sonnet and opus enabled for this account?' },
     { title: 'Recon', detail: 'sonnet reads the repo: git state, ecosystem, how it verifies itself', model: 'sonnet' },
     { title: 'Spec', detail: 'opus turns the idea into a spec (brainstorming doctrine), commits it', model: 'opus' },
-    { title: 'Spec review', detail: 'opus adversarially reviews the spec; opus folds the findings in', model: 'opus' },
+    { title: 'Spec review', detail: 'opus adversarially reviews the spec, then folds its own findings in', model: 'opus' },
     { title: 'Plan', detail: 'opus writes the implementation plan from the spec (writing-plans doctrine), commits it', model: 'opus' },
-    { title: 'Plan review', detail: 'opus adversarially reviews the plan against the tree; opus folds the findings in', model: 'opus' },
+    { title: 'Plan review', detail: 'opus adversarially reviews the plan against the tree (reading and compiling, never running the tests), then folds its own findings in', model: 'opus' },
     { title: 'Slice', detail: 'opus maps the plan\'s tasks onto file-disjoint slices', model: 'opus' },
     { title: 'Implement', detail: 'sonnet writes and commits each slice', model: 'sonnet' },
     { title: 'Review', detail: 'opus adversarially reviews the combined diff and re-runs the repo\'s check', model: 'opus' },
@@ -718,17 +718,22 @@ const SPEC_SCHEMA = {
   },
 }
 
+// One lane reviews the document adversarially AND folds its own findings in. It used to be
+// two Opus agents (reviewer, then a fold-in author who could refute); measured on
+// 2026-09-11 the fold-ins were 16 of 92 front-half minutes, a second cold read of the
+// same document and repo, and refuted 0 of 17 findings. A finding the reviewer decides
+// does not hold on verification is `withdrawn`, with the evidence, instead of folded.
 const DOC_REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['status', 'findings', 'summary'],
+  required: ['status', 'findings', 'commit_sha', 'summary'],
   properties: {
     status: { type: 'string', enum: ['approved', 'issues_found'] },
     findings: {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false,
-        required: ['id', 'severity', 'where', 'claim', 'evidence', 'fix'],
+        required: ['id', 'severity', 'where', 'claim', 'evidence', 'fix', 'disposition'],
         properties: {
           id: { type: 'string', description: 'F1, F2, …' },
           severity: { type: 'string', enum: ['critical', 'major', 'minor'] },
@@ -736,11 +741,14 @@ const DOC_REVIEW_SCHEMA = {
           claim: { type: 'string', description: 'What is wrong, specifically.' },
           evidence: { type: 'string', description: 'What you ran or read that shows it: a command and its output, a file:line, a contradiction quoted from the document.' },
           fix: { type: 'string', description: 'What the document should say instead.' },
+          disposition: { type: 'string', enum: ['folded', 'withdrawn'], description: 'folded: you changed the document accordingly. withdrawn: on verification the finding did not hold, or it would reverse a recorded owner decision — say which in `changed`.' },
+          changed: { type: 'string', description: 'What you changed in the document for this finding, or why it was withdrawn.' },
         },
       },
     },
     recommendations: { type: 'array', items: { type: 'string' }, description: 'Advisory; never blocks.' },
     questions_for_owner: QUESTION_ITEMS,
+    commit_sha: { type: 'string', description: 'The commit that carries the fold-in; empty if nothing was folded.' },
     summary: { type: 'string' },
   },
 }
@@ -812,12 +820,10 @@ const PROFILE = {
   review: { model: JUDGE, cache: 17.0, write: 0.45, out: 0.011, measured: true },      // per adversarial pass (now also runs the check)
   patch: { model: CODER, cache: 12.0, write: 0.08, out: 0.030, measured: true },       // per patched finding
   spec: { model: JUDGE, cache: 10.0, write: 0.3, out: 0.030, measured: false },
-  doc_review: { model: JUDGE, cache: 15.0, write: 0.3, out: 0.015, measured: false },   // spec reviewer
-  doc_fold: { model: JUDGE, cache: 10.0, write: 0.3, out: 0.020, measured: false },
+  doc_review: { model: JUDGE, cache: 18.0, write: 0.4, out: 0.035, measured: false },   // reviews AND folds in (spec 7.6+4.7M / plan 19+6.5M cache measured as two lanes on 2026-09-11)
   plan_doc: { model: JUDGE, cache: 20.0, write: 0.4, out: 0.060, measured: false },
   plan_review: { model: JUDGE, cache: 25.0, write: 0.4, out: 0.020, measured: false },
   answers: { model: JUDGE, cache: 8.0, write: 0.2, out: 0.015, measured: false },
-  record: { model: CODER, cache: 3.0, write: 0.1, out: 0.005, measured: false },
   plan_index: { model: CODER, cache: 1.5, write: 0.05, out: 0.003, measured: false },
   probe: { model: CODER, cache: 0.01, write: 0.005, out: 0.0002, measured: false },      // per model probed
 }
@@ -911,18 +917,21 @@ const recon = await callAgent(
     '   Terraform/OpenTofu, Helm charts, shell, SQL, docs, or several of those at once.',
     '   Say what it actually is in `ecosystem`.',
     '',
-    '3. HOW IT VERIFIES ITSELF. Find every command that can FAIL and thereby prove',
-    '   something, and RUN each one to confirm it works in this environment before you',
-    '   report it. Look here:',
+    '3. HOW IT VERIFIES ITSELF. Find every command that can FAIL and thereby prove something. Look here:',
     DISCOVERY_HINTS,
     '',
-    '   Set `verified_runs` true only for commands you actually executed. A command that',
-    '   needs credentials, network or a running service you do not have is still worth',
-    '   reporting — mark verified_runs false and say why in `source`.',
-    '   Set `primary_check_cmd` to the one command downstream agents should run: prefer a',
-    '   real test suite, else validate/lint/build. If the repo genuinely has nothing',
-    '   executable, return an empty string and has_executable_checks:false. That is an',
-    '   honest and useful answer — do NOT invent a plausible-looking command.',
+    '   RUN EXACTLY ONE of them: the one you will name `primary_check_cmd`. Choose the FASTEST command that',
+    '   genuinely proves something — a smoke or quick target over the full suite, a real test run over',
+    '   validate/lint/build. Run it in the foreground under `timeout 180`; if it does not finish in that time,',
+    '   it is not the primary: report it with verified_runs false and "too slow for the run" in `source`, and',
+    '   pick a faster one. Every other command is reported with verified_runs false, unexecuted. Never start a',
+    '   check in the background, never poll a process, never inspect why a test run is slow: that is not your',
+    '   job, and the run you are the first agent of pays for every minute you spend on it. (Measured: a recon',
+    '   that ran the full suite and babysat it took 7 minutes and 67 tool calls; the number was never used.)',
+    '   A command that needs credentials, network or a running service you do not have is still worth',
+    '   reporting — verified_runs false and say why in `source`. If the repo genuinely has nothing',
+    '   executable, return an empty string and has_executable_checks:false. That is an honest and useful',
+    '   answer — do NOT invent a plausible-looking command.',
     '',
     '4. LAYOUT AND CONVENTIONS. Read CLAUDE.md / AGENTS.md / CONTRIBUTING.md / README.',
     '   Capture anything an implementer would otherwise waste three tool calls rediscovering,',
@@ -1130,15 +1139,17 @@ function docLaneLost(kind, rounds) {
 }
 
 async function reviewAndFold(kind, docPath, extra) {
-  // kind: 'spec' | 'plan'. Returns the list of {review, fold} rounds.
+  // kind: 'spec' | 'plan'. Returns the list of {review, fold} rounds; `fold` is derived
+  // from the same agent's dispositions so the consumers keep their shape.
   const out = []
   for (let r = 1; r <= DOC_ROUNDS; r++) {
     phase(kind === 'spec' ? 'Spec review' : 'Plan review')
     const review = await callAgent(
       [
         'You are the ADVERSARIAL REVIEWER of a ' + (kind === 'spec' ? 'design spec' : 'implementation plan') +
-        '. Your job is to REFUTE the claim that it is complete, consistent and ready for the next stage.',
-        'A clean verdict you cannot defend is worse than a false alarm; a finding without evidence is noise.',
+        ', and then its EDITOR. First refute the claim that it is complete, consistent and ready for the next',
+        'stage; then fold in what held, and commit. A clean verdict you cannot defend is worse than a false',
+        'alarm; a finding without evidence is noise.',
         '',
         'THE DOCUMENT: ' + docPath + ' — read it whole.',
         (extra || ''),
@@ -1148,11 +1159,12 @@ async function reviewAndFold(kind, docPath, extra) {
         '',
         (kind === 'spec'
           ? [
-            'WHAT TO CHECK (the superpowers spec reviewer, sharpened):',
+            'PART 1 — REVIEW. WHAT TO CHECK (the superpowers spec reviewer, sharpened):',
             '- Completeness: TODOs, placeholders, TBDs, incomplete sections, a decision the document dodges.',
             '- Consistency: internal contradictions, conflicting requirements, an architecture that does not match the features.',
             '- Clarity: a requirement ambiguous enough that someone would build the wrong thing.',
-            '- Scope: focused enough for ONE plan; unrequested features; over-engineering (YAGNI).',
+            '- Scope: focused enough for ONE plan; unrequested features; over-engineering (YAGNI); and the other',
+            '  direction — a place the change must reach that the spec forgot (a second UI, a second caller, a report).',
             '- Reality: does the spec\'s account of the CURRENT code match the tree? Open the files it names and',
             '  check every claim about them. A spec built on a wrong reading of the code produces a wrong plan.',
             '- The "Decisions taken without the owner" section: is every decision there defensible, and is',
@@ -1161,85 +1173,85 @@ async function reviewAndFold(kind, docPath, extra) {
             'other sections" are not findings.',
           ].join('\n')
           : [
-            'WHAT TO CHECK (the superpowers plan reviewer, sharpened by what plan reviews caught this week):',
+            'PART 1 — REVIEW. WHAT TO CHECK (the superpowers plan reviewer, sharpened by what plan reviews caught):',
             '- Completeness: TODOs, placeholders, incomplete tasks, missing steps, "similar to Task N".',
             '- Spec alignment: every spec requirement maps to a task; no major scope creep; every "Global',
             '  Constraint" copied verbatim from the spec.',
-            '- Buildability against the REAL tree — this is where plan reviews earn their keep:',
+            '- Buildability against the REAL tree, BY READING AND COMPILING — this is where plan reviews earn their keep:',
             '    * every `Modify: path:lines` range: open the file and check the range holds the code the task edits;',
             '    * every fenced code block: parse/compile it where the language allows (`python -m py_compile`,',
-            '      `node --check`, `tofu validate` …); a block shown in context may need a wrapper — say which;',
-            '    * every test the plan gives: do the fixtures, helpers and imports it uses exist? would its',
-            '      Step 2 really fail red, and its Step 4 really go green?',
+            '      `node --check`, `tofu validate` … on a copy in a temp file); a block shown in context may need a wrapper — say which;',
+            '    * every test the plan gives: do the fixtures, helpers and imports it uses exist (grep them)? would its',
+            '      Step 2 really fail red for the stated reason, and its Step 4 really go green?',
             '    * every Consumes/Produces signature: does the name defined in one task match its use in another?',
             '    * the file-overlap table: does it match every task\'s Files list? are the chains short?',
-            '  Where it is cheap, splice a task into a scratch `git worktree` (a temporary directory, never this',
-            '  checkout) and run its own commands. That is the strongest evidence a plan review can produce.',
+            '  DO NOT run the test suite, a task\'s tests, or the check command, and do NOT create a worktree or',
+            '  splice a task in. Every task is implemented a phase later by a fresh agent that runs its tests red',
+            '  and green for real, and a reviewer then re-runs the check on the whole; a test run here is paid',
+            '  twice. (Measured: a plan review that spliced tasks into a worktree took 22 minutes and 77 tool calls;',
+            '  its findings were ones the implementers would have hit in their own red-green cycle.)',
             '- Task decomposition: clear boundaries; steps actionable; a test cycle per task.',
             '- Sequencing: tasks in an order where each one\'s Consumes already exists.',
             'Calibration: flag only what would cause an implementer to build the wrong thing or get stuck.',
           ].join('\n')),
         '',
         DOCTRINE_REVIEW_CALIBRATION,
-        'RULES:',
+        'REVIEW RULES:',
         '- Every finding carries EVIDENCE: the command you ran and what it printed, the file:line you read, the',
-        '  two sentences that contradict each other. Under uncertainty, raise it — a false positive costs one',
-        '  fold-in agent; a false negative costs a build.',
-        '- status "approved" ONLY if you read the whole document and found nothing meeting that bar.',
+        '  two sentences that contradict each other. Under uncertainty, raise it — you will verify it yourself',
+        '  in Part 2 before it changes anything; a false negative costs a build.',
+        '- status "approved" ONLY if you read the whole document and found nothing meeting that bar; then Part 2',
+        '  is empty and commit_sha is empty.',
         '- A decision the document took that the OWNER should make (money, risk, data, ownership, a reversal',
         '  of something that exists, a choice careful colleagues would make differently) is not a finding —',
-        '  put it in `questions_for_owner` with options, consequences and your recommendation. The run pauses',
-        '  and asks. Do not raise a question the document already lists as one.',
-        '- You do not edit the document. You do not commit.',
+        '  put it in `questions_for_owner` with options, consequences and your recommendation. ' +
+        (PAUSE_FOR_OWNER
+          ? 'The run pauses and asks. Do not raise a question the document already lists as one.'
+          : 'The owner will NOT be asked in this run: write your recommended option into the document as the\n' +
+            '  decision, marked "(recommended option; owner not asked)". Do not raise a question the document already lists.'),
+        '',
+        'PART 2 — FOLD IN. ' + DOCTRINE_RECEIVING,
+        'FOLD-IN RULES:',
+        '- Take your findings one at a time. VERIFY each against the document and the tree again before you act:',
+        '  a finding that does not survive its own verification is `withdrawn` with the evidence in `changed`,',
+        '  and the text is left as it was. Fold in the rest and say in `changed` what changed.',
+        '- The owner\'s recorded decisions (' + (kind === 'spec' ? 'the "Decisions taken without the owner" and "Decisions taken by the owner" sections' : 'the spec\'s decisions, which the plan must not silently reverse') + ')',
+        '  outrank you. A finding that would reverse one is `withdrawn` on that ground, and says so.',
+        '- Keep the document whole and consistent after every fold-in: file map, overlap table, self-review,',
+        '  line ranges (re-measure them), test names. No placeholders may appear as a result of a fold-in.',
+        '- Fix only what a finding names. A fold-in is not a rewrite: do not restructure, re-scope or polish',
+        '  sections no finding touches.',
+        '- Append a "## Fold-in record (review round ' + r + ')" section: a table of every finding id, severity,',
+        '  disposition (folded / withdrawn) and what changed or why not.',
+        '- ' + COMMIT_RULES + ' Report the commit in commit_sha.',
         (r > 1 ? '\nThis is review round ' + r + '; the fold-in of round ' + (r - 1) + ' is already in the file.' : ''),
       ].join('\n'),
       { label: kind + '-review:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: DOC_REVIEW_SCHEMA }
     )
     if (!review) { out.push({ round: r, review: null, fold: null, lost: 'reviewer' }); break }
-    log(kind + ' review round ' + r + ': ' + review.status + ', ' + review.findings.length + ' finding(s)')
-    if (review.status === 'approved' || review.findings.length === 0) { out.push({ round: r, review, fold: null }); break }
-
-    const fold = await callAgent(
-      [
-        'You are the AUTHOR folding an adversarial review into your ' + (kind === 'spec' ? 'spec' : 'plan') + '.',
-        '',
-        'THE DOCUMENT: ' + docPath,
-        (extra || ''),
-        '',
-        'THE FINDINGS:',
-        JSON.stringify(review.findings, null, 2),
-        (review.recommendations && review.recommendations.length ? '\nADVISORY (fold in only if clearly right): ' + review.recommendations.join(' | ') : ''),
-        '',
-        DOCTRINE_RECEIVING,
-        'RULES:',
-        '- Verify each finding against the document and the tree before you act on it. Fold in the ones that',
-        '  hold; refute the ones that do not, with the concrete evidence, and leave the text as it was.',
-        '- The owner\'s recorded decisions (' + (kind === 'spec' ? 'the "Decisions taken without the owner" section' : 'the spec\'s decisions, which the plan must not silently reverse') + ')',
-        '  outrank a reviewer. A finding that would reverse one is refuted on that ground, and reported.',
-        '- Keep the document whole and consistent after every fold-in: file map, overlap table, self-review,',
-        '  line ranges (re-measure them), test names. No placeholders may appear as a result of a fold-in.',
-        '- Append a "## Fold-in record (review round ' + r + ')" section: a table of every finding id, verdict',
-        '  (folded / refuted) and what changed or why not.',
-        '- ' + COMMIT_RULES,
-      ].join('\n'),
-      { label: kind + '-fold:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: FOLD_SCHEMA }
-    )
-    out.push({ round: r, review, fold, ...(fold ? {} : { lost: 'fold-in author' }) })
-    if (!fold) break
-    log(kind + ' fold-in round ' + r + ': ' + fold.folded.length + ' folded, ' + fold.refuted.length + ' refuted')
-    // A fold-in is a decision too: the author changed the document on a reviewer's word,
-    // or refused to. Both go into the decision record, so the owner can overturn either.
-    const byId = Object.fromEntries((review.findings || []).map((f) => [f.id, f]))
-    for (const id of fold.folded || []) {
-      const f = byId[id] || {}
-      documents.decisions.push({ stage: kind + '-fold', question: 'Review finding ' + id + (f.claim ? ': ' + f.claim : ''),
-        decision: 'folded in' + (f.fix ? ': ' + f.fix : ''), why: f.evidence ? 'reviewer\'s evidence: ' + f.evidence : 'the finding held' })
+    const findings = Array.isArray(review.findings) ? review.findings : []
+    const folded = findings.filter((f) => f.disposition === 'folded')
+    const withdrawn = findings.filter((f) => f.disposition !== 'folded')
+    // The same agent's dispositions, in the shape the earlier two-lane design reported.
+    const fold = findings.length
+      ? { folded: folded.map((f) => f.id), refuted: withdrawn.map((f) => ({ id: f.id, evidence: f.changed || 'withdrawn without a reason' })),
+        commit_sha: review.commit_sha || '', summary: review.summary }
+      : null
+    log(kind + ' review round ' + r + ': ' + review.status + ', ' + findings.length + ' finding(s)' +
+      (findings.length ? ' — ' + folded.length + ' folded, ' + withdrawn.length + ' withdrawn' + (fold && fold.commit_sha ? ' @ ' + String(fold.commit_sha).slice(0, 8) : ' (no commit reported)') : ''))
+    if (folded.length && !review.commit_sha) log('WARNING: the ' + kind + ' reviewer folded ' + folded.length + ' finding(s) but reported no commit')
+    out.push({ round: r, review, fold })
+    // A fold-in is a decision too: the reviewer changed the document on its own finding, or
+    // withdrew it. Both go on the record, so the owner can overturn either.
+    for (const f of folded) {
+      documents.decisions.push({ stage: kind + '-fold', question: 'Review finding ' + f.id + (f.claim ? ': ' + f.claim : ''),
+        decision: 'folded in' + (f.changed ? ': ' + f.changed : f.fix ? ': ' + f.fix : ''), why: f.evidence ? 'reviewer\'s evidence: ' + f.evidence : 'the finding held' })
     }
-    for (const ref of fold.refuted || []) {
-      const f = byId[ref.id] || {}
-      documents.decisions.push({ stage: kind + '-fold', question: 'Review finding ' + ref.id + (f.claim ? ': ' + f.claim : ''),
-        decision: 'refuted; document left as it was', why: ref.evidence || 'no evidence given' })
+    for (const f of withdrawn) {
+      documents.decisions.push({ stage: kind + '-fold', question: 'Review finding ' + f.id + (f.claim ? ': ' + f.claim : ''),
+        decision: 'withdrawn; document left as it was', why: f.changed || 'no reason given' })
     }
+    if (review.status === 'approved' || findings.length === 0) break
   }
   return out
 }
@@ -1275,6 +1287,9 @@ if (FROM === 'idea') {
       '  options, the consequence of each, and your recommendation with its reason; write the recommended',
       '  option into the spec as the provisional decision, marked "pending owner", so the document is',
       '  complete either way. The run will pause and ask the owner. Everything below that bar, decide.',
+      (PAUSE_FOR_OWNER ? '' : '- THE OWNER WILL NOT BE ASKED in this run (pauseForOwner:false). Still list such questions in\n' +
+        '  `open_questions` with your recommendation, but write the recommended option into the document as the\n' +
+        '  decision, marked "(recommended option; owner not asked)" — never "pending owner".'),
       '- ' + COMMIT_RULES,
     ].join('\n'),
     { label: 'spec', phase: 'Spec', model: JUDGE, effort: EFFORT, schema: SPEC_SCHEMA }
@@ -1345,6 +1360,9 @@ if (FROM === 'idea' || FROM === 'spec') {
       '  `open_questions` with two to four options, the consequence of each, and your recommendation; write the',
       '  recommended option into the plan as the provisional decision, marked "pending owner". The run pauses',
       '  and asks. Everything below that bar, decide and record.',
+      (PAUSE_FOR_OWNER ? '' : '- THE OWNER WILL NOT BE ASKED in this run (pauseForOwner:false). Still list such questions in\n' +
+        '  `open_questions` with your recommendation, but write the recommended option into the document as the\n' +
+        '  decision, marked "(recommended option; owner not asked)" — never "pending owner".'),
     ].join('\n'),
     { label: 'plan-doc', phase: 'Plan', model: JUDGE, effort: EFFORT, schema: PLANDOC_SCHEMA }
   )
@@ -1368,64 +1386,13 @@ if (FROM === 'idea' || FROM === 'spec') {
   planReindexed = documents.plan_reviews.some((r) => r.fold && r.fold.commit_sha) || Boolean(appliedPlan && appliedPlan.commit_sha)
 }
 
-// ---------------------------------------------------------------------------
-// The decision record. Before any code is written, both documents the engine
-// wrote carry ONE complete list of every decision behind the build — taken by
-// the spec writer, the plan writer, a fold-in, or the owner — with who took it
-// and when, and no "pending owner" marker survives. That final state is what
-// gets committed and, after the merge, what main records.
-// ---------------------------------------------------------------------------
-if (documents.spec || documents.plan) {
-  phase('Plan review')
-  const record = documents.decisions.map((d, i) => ({
-    n: i + 1,
-    stage: d.stage,
-    by: d.why === 'the owner\'s answer' ? 'owner'
-      : String(d.decision).includes('owner not asked') ? 'engine (recommended option stood, owner not asked)'
-      : String(d.stage).endsWith('-fold') ? 'engine (' + String(d.stage).replace('-fold', '') + ' fold-in author)'
-      : 'engine (' + d.stage + ' writer)',
-    question: d.question, decision: d.decision, why: d.why,
-  }))
-  const targets = [documents.spec ? SPEC_PATH : null, documents.plan ? PLAN_PATH : null].filter(Boolean)
-  const recorded = await callAgent(
-    [
-      'You are the RECORDER. Make the final decision record of this build explicit in the document(s) below,',
-      'then commit them. You write no code and change no decision.',
-      '',
-      'DOCUMENTS: ' + targets.join(', ') + (FROM === 'spec' ? '  (the spec was supplied by the owner and is NOT edited; only the plan is)' : ''),
-      'DATE: ' + TODAY,
-      '',
-      'THE DECISIONS, in the order they were taken:',
-      JSON.stringify(record, null, 2),
-      '',
-      'DO THIS, for each document:',
-      '- Append (or replace, if one exists) a section "## Decision record" holding ONE table with every',
-      '  decision above: number, stage, taken by (owner / engine), question, decision, why. Keep the',
-      '  documents\' own earlier tables ("Decisions taken without the owner", "Decisions taken by the owner",',
-      '  "Decisions taken by the plan", the fold-in records) — this record is the consolidated index of them.',
-      '- Resolve every "pending owner" marker in the text: where the owner answered, it already says so; where',
-      '  the recommended option stood because the owner was not asked, replace the marker with',
-      '  "(recommended option; owner not asked — see Decision record #N)". No "pending" may remain.',
-      '- Do not change any decision, any code block or any line range. If a decision in the list contradicts',
-      '  what the document says, do NOT reconcile it silently: note the contradiction in the record\'s row.',
-      '- Commit the touched document(s) in ONE commit. ' + COMMIT_RULES,
-    ].join('\n'),
-    { label: 'decision-record', phase: 'Plan review', model: CODER, effort: EFFORT, schema: FOLD_SCHEMA }
-  )
-  documents.decision_record = { entries: record, commit_sha: recorded ? recorded.commit_sha : null, summary: recorded ? recorded.summary : 'recorder returned nothing' }
-  log('decision record: ' + record.length + ' decision(s) written into ' + targets.join(' and ') + (recorded && recorded.commit_sha ? ' @ ' + recorded.commit_sha.slice(0, 8) : ' (NOT committed)'))
-  // The record is the one place every decision behind the build is written down; code
-  // must not be built without it. The resume is cheap: everything before replays from cache.
-  if (!recorded) {
-    return { ok: false, stage: 'record', error: 'the recorder returned nothing after its fallback; the decision record is not committed and no code was built. Relaunch to retry.',
-      recon, documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null }, lane_errors: laneErrors }
-  }
-  planReindexed = planReindexed || Boolean(documents.plan && recorded.commit_sha)
-}
-
-// Line ranges move under a fold-in, an answers commit and the recorder's edits, and the
-// slicer hands them to implementers as pointers — so the plan is measured once, AFTER
-// the last agent that wrote into it. The plan writer's decisions stay on the record.
+// There is no consolidated decision recorder (removed 2026-09-12: a 6-minute Sonnet lane
+// that re-wrote 45 decisions already present in the documents' own tables — the spec
+// writer's, the plan writer's, each fold-in record and the owner's answers). Every
+// decision is still in `documents.decisions`, in order, and in the documents themselves.
+// Line ranges move under a fold-in and an answers commit, and the slicer hands them to
+// implementers as pointers — so the plan is measured once, AFTER the last agent that
+// wrote into it (a 25-second Sonnet call). The plan writer's decisions stay on the record.
 if (planReindexed && planDoc) {
   const remeasured = await callAgent(
     [
@@ -1551,12 +1518,10 @@ const spentCounts = {
   probe: PROBE_MODELS ? new Set([CODER, JUDGE]).size : 0,
   recon: 1,
   spec: documents.spec ? 1 : 0,
-  doc_review: documents.spec_reviews.filter((r) => r.review).length,
-  doc_fold: documents.spec_reviews.filter((r) => r.fold).length + documents.plan_reviews.filter((r) => r.fold).length,
+  doc_review: documents.spec_reviews.filter((r) => r.review).length + documents.plan_reviews.filter((r) => r.review).length,
   plan_doc: documents.plan && FROM !== 'plan' ? 1 : 0,
   plan_review: documents.plan_reviews.filter((r) => r.review).length,
   answers: (answersFor('spec').length ? 1 : 0) + (answersFor('plan').length ? 1 : 0),
-  record: documents.decision_record ? 1 : 0,
   plan_index: planReindexed ? 1 : 0,
   slice: 1,
 }

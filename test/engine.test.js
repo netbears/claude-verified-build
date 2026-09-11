@@ -31,16 +31,11 @@ function table(over) {
     recon: RECON,
     spec: { path: 'docs/specs/2026-09-11-x.md', slug: 'x', classification: 'bounded', title: 'x', summary: 's',
       decisions: [{ question: 'q', decision: 'd', why: 'w' }], open_questions: [], commit_sha: 's1' },
-    'spec-review:r1': { status: 'issues_found', findings: [{ id: 'F1', severity: 'major', where: 'sec 2', claim: 'wrong', evidence: 'line 3', fix: 'say X' }], summary: 'one' },
-    'spec-fold:r1': { folded: ['F1'], refuted: [], commit_sha: 's2', summary: 'folded' },
+    'spec-review:r1': { status: 'issues_found', findings: [{ id: 'F1', severity: 'major', where: 'sec 2', claim: 'wrong', evidence: 'line 3', fix: 'say X', disposition: 'folded', changed: 'said X' }], commit_sha: 's2', summary: 'one, folded' },
     'plan-doc': { path: 'docs/plans/2026-09-11-x.md', title: 'x', commit_sha: 'p1', global_constraints_lines: '5-9',
       tasks: [{ n: 1, title: 'a', files: ['src/a.js'], lines: '10-40' }, { n: 2, title: 'b', files: ['src/b.js'], lines: '41-80' }],
       decisions: [{ question: 'order', decision: 'a first', why: 'b consumes a' }] },
-    'plan-review:r1': { status: 'approved', findings: [], summary: 'fine' },
-    'decision-record': { folded: [], refuted: [], commit_sha: 'd1', summary: 'recorded' },
-    // The recorder commits into the plan, so the plan is re-measured on every run that has one.
-    'plan-index': { path: 'docs/plans/2026-09-11-x.md', title: 'x', commit_sha: 'd1', global_constraints_lines: '5-9',
-      tasks: [{ n: 1, title: 'a', files: ['src/a.js'], lines: '10-40' }, { n: 2, title: 'b', files: ['src/b.js'], lines: '41-80' }] },
+    'plan-review:r1': { status: 'approved', findings: [], commit_sha: '', summary: 'fine' },
     'spec-answers': { folded: [], refuted: [], commit_sha: 'a1', summary: 'answers recorded' },
     'plan-answers': { folded: [], refuted: [], commit_sha: 'a2', summary: 'answers recorded' },
     slice: { shared_context: 'ctx', task_summary: 'brief', slices: SLICES, uncovered: [] },
@@ -89,16 +84,19 @@ test('first launch: probes, recon, the documents, the slicer, then pauses at the
   assert.ok(Number.isFinite(out.estimate.total_expected_usd) && out.estimate.total_expected_usd > 0)
   assert.ok(out.estimate.breakdown['done:probe'])
   assert.deepEqual(labels.slice(0, 3).sort(), ['probe:opus', 'probe:sonnet', 'recon'])
-  assert.ok(labels.includes('spec') && labels.includes('spec-review:r1') && labels.includes('spec-fold:r1'))
-  assert.ok(labels.includes('plan-doc') && labels.includes('plan-review:r1') && labels.includes('decision-record'))
+  assert.ok(labels.includes('spec') && labels.includes('spec-review:r1'))
+  assert.ok(labels.includes('plan-doc') && labels.includes('plan-review:r1'))
+  assert.ok(!labels.some((l) => /-fold:|decision-record/.test(l)), 'no separate fold-in author and no recorder: ' + labels.join(','))
+  assert.ok(!labels.includes('plan-index'), 'an approved plan review commits nothing, so the plan is not re-measured')
   assert.equal(labels[labels.length - 1], 'slice')
   assert.ok(!labels.some((l) => l.startsWith('impl:')), 'nothing implemented before approval')
 })
 
-test('a plan fold-in with a commit re-measures the plan and keeps the writer\'s decisions', async () => {
+test('a plan review that folds a finding in re-measures the plan and keeps the writer\'s decisions', async () => {
   const { out, labels } = await run(BASE_ARGS, {
-    'plan-review:r1': { status: 'issues_found', findings: [{ id: 'F1', severity: 'major', where: 'Task 2', claim: 'range off', evidence: 'sed', fix: 'fix' }], summary: 'one' },
-    'plan-fold:r1': { folded: ['F1'], refuted: [], commit_sha: 'p2', summary: 'folded' },
+    'plan-review:r1': { status: 'issues_found', findings: [
+      { id: 'F1', severity: 'major', where: 'Task 2', claim: 'range off', evidence: 'sed', fix: 'fix', disposition: 'folded', changed: 'fixed the range' },
+      { id: 'F2', severity: 'minor', where: 'Task 1', claim: 'wrong', evidence: 'grep', fix: 'x', disposition: 'withdrawn', changed: 'the owner decided this in spec §3' }], commit_sha: 'p2', summary: 'one folded, one withdrawn' },
     'plan-index': { path: 'docs/plans/2026-09-11-x.md', title: 'x', commit_sha: 'p2', global_constraints_lines: '5-9',
       tasks: [{ n: 1, title: 'a', files: ['src/a.js'], lines: '10-44' }, { n: 2, title: 'b', files: ['src/b.js'], lines: '45-90' }] },
   })
@@ -106,7 +104,9 @@ test('a plan fold-in with a commit re-measures the plan and keeps the writer\'s 
   assert.equal(out.documents.plan.tasks[1].lines, '45-90')
   assert.equal(out.documents.plan.decisions.length, 1)
   assert.ok(out.estimate.breakdown['done:plan_index'])
-  assert.ok(out.documents.decisions.some((d) => d.stage === 'plan-fold'))
+  assert.ok(out.documents.decisions.some((d) => d.stage === 'plan-fold' && /folded in/.test(d.decision)))
+  assert.ok(out.documents.decisions.some((d) => d.stage === 'plan-fold' && /withdrawn/.test(d.decision) && /owner decided/.test(d.why)))
+  assert.deepEqual(out.documents.plan_reviews[0].fold, { folded: ['F1'], refuted: [{ id: 'F2', evidence: 'the owner decided this in spec §3' }], commit_sha: 'p2', summary: 'one folded, one withdrawn' })
 })
 
 test('a partial price override still yields a finite total, and maxUsd passes only a finite total', async () => {
@@ -132,10 +132,9 @@ test('approved run: implements, reviews, patches the major, re-reviews clean, ha
   assert.deepEqual(out.for_orchestrator.map((f) => f.id), ['r0:F2'])
   assert.match(out.for_orchestrator[0].source, /handed off/)
   assert.equal(out.for_orchestrator_by_severity.minor, 1)
-  assert.equal(out.documents.decision_record.commit_sha, 'd1')
+  assert.equal(out.documents.decision_record, undefined, 'no consolidated recorder')
   const stages = out.documents.decisions.map((d) => d.stage)
   assert.ok(stages.includes('spec') && stages.includes('spec-fold') && stages.includes('plan'), 'fold-ins are on the record: ' + stages)
-  assert.equal(out.documents.decision_record.entries.find((e) => e.stage === 'spec-fold').by, 'engine (spec fold-in author)')
   assert.deepEqual(out.documents.plan.decisions.length, 1, 'the re-measure keeps the plan writer\'s decisions')
   assert.equal(out.models.fallbacks.used.length, 0)
 })
@@ -276,7 +275,6 @@ test('from:plan: no documents, no record, straight to the slicer', async () => {
   const { out, labels } = await run({ task: 'docs/plans/2026-09-11-x.md', from: 'plan' })
   assert.equal(out.stage, 'estimate')
   assert.deepEqual(labels.filter((l) => !l.startsWith('probe:')), ['recon', 'slice'])
-  assert.equal(out.documents.decision_record, undefined)
 })
 
 test('the token budget stops the run between phases with a report instead of a wall of nulls', async () => {
@@ -504,32 +502,40 @@ test('an answers author that returns nothing stops the run: the owner\'s decisio
   assert.ok(!out.documents.decisions.some((d) => d.why === "the owner's answer"))
 })
 
-test('a document reviewer or fold-in that returns nothing stops the run before anything is sliced', async () => {
+test('a document reviewer that returns nothing stops the run before anything is sliced', async () => {
   const a = await run(BASE_ARGS, { 'spec-review:r1': null })
   assert.equal(a.out.ok, false); assert.equal(a.out.stage, 'spec-review'); assert.ok(!a.labels.includes('slice'))
-  const b = await run(BASE_ARGS, { 'spec-fold:r1': null })
-  assert.equal(b.out.ok, false); assert.equal(b.out.stage, 'spec-review'); assert.ok(!b.labels.includes('plan-doc'))
   const c = await run(BASE_ARGS, { 'plan-review:r1': null })
   assert.equal(c.out.ok, false); assert.equal(c.out.stage, 'plan-review'); assert.ok(!c.labels.includes('slice'))
 })
 
-test('a recorder that returns nothing stops the run: no code is built on an uncommitted decision record', async () => {
-  const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true }, { 'decision-record': null })
-  assert.equal(out.ok, false)
-  assert.equal(out.stage, 'record')
-  assert.ok(!labels.includes('slice'))
-  assert.equal(out.documents.decision_record.commit_sha, null)
+test('the plan is re-measured once, after the owner\'s answers are written into it', async () => {
+  const withQ = { 'plan-doc': { ...table()['plan-doc'], open_questions: [{ id: 'Q1', question: 'Drop now?', options: [
+    { label: 'now', consequence: 'gone' }, { label: 'later', consequence: 'kept' }], recommended: 'later', why: 'reversible' }] },
+    'plan-answers': { folded: [], refuted: [], commit_sha: 'a2', summary: 'answers recorded' },
+    'plan-index': { path: 'docs/plans/2026-09-11-x.md', title: 'x', commit_sha: 'a2', global_constraints_lines: '5-9',
+      tasks: [{ n: 1, title: 'a', files: ['src/a.js'], lines: '10-44' }, { n: 2, title: 'b', files: ['src/b.js'], lines: '45-90' }] } }
+  const { labels, out } = await run({ ...BASE_ARGS, answers: [{ id: 'plan:Q1', answer: 'later' }] }, withQ)
+  assert.ok(labels.indexOf('plan-index') > labels.indexOf('plan-answers'), 'measured after the answers author: ' + labels.join(','))
+  assert.equal(labels.filter((l) => l === 'plan-index').length, 1)
+  assert.equal(out.documents.plan.commit_sha, 'a2')
+  assert.equal(out.documents.plan.tasks[1].lines, '45-90')
+  assert.equal(out.documents.plan.decisions.length, 1)
 })
 
-test('the plan is re-measured after the recorder commits into it, so slice pointers are current', async () => {
-  const { labels, out } = await run(BASE_ARGS, {
-    'plan-index': { path: 'docs/plans/2026-09-11-x.md', title: 'x', commit_sha: 'd1', global_constraints_lines: '5-9',
-      tasks: [{ n: 1, title: 'a', files: ['src/a.js'], lines: '10-40' }, { n: 2, title: 'b', files: ['src/b.js'], lines: '41-80' }] },
-  })
-  assert.ok(labels.indexOf('plan-index') > labels.indexOf('decision-record'), 'measured after the recorder: ' + labels.join(','))
-  assert.equal(labels.filter((l) => l === 'plan-index').length, 1, 'one measurement per run, after every commit into the plan')
-  assert.equal(out.documents.plan.commit_sha, 'd1')
-  assert.equal(out.documents.plan.decisions.length, 1)
+test('with pauseForOwner:false the writers and reviewers are told the owner will not be asked, and no lane babysits a test run', async () => {
+  const { calls } = await run({ ...BASE_ARGS, pauseForOwner: false })
+  for (const l of ['spec', 'plan-doc', 'spec-review:r1', 'plan-review:r1']) {
+    assert.match(calls.find((c) => c.label === l).prompt, /owner not asked/, l)
+  }
+  const paused = await run(BASE_ARGS)
+  assert.doesNotMatch(paused.calls.find((c) => c.label === 'spec').prompt, /WILL NOT BE ASKED/)
+  const recon = paused.calls.find((c) => c.label === 'recon').prompt
+  assert.match(recon, /RUN EXACTLY ONE/)
+  assert.match(recon, /timeout 180/)
+  const planReview = paused.calls.find((c) => c.label === 'plan-review:r1').prompt
+  assert.match(planReview, /DO NOT run the test suite/)
+  assert.match(planReview, /PART 2 — FOLD IN/)
 })
 
 // ---------------------------------------------------------------------------

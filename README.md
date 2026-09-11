@@ -20,17 +20,16 @@ flowchart TD
     I([idea · spec · plan]) --> PB[Probe<br/>one tool-free call each to sonnet and opus: usable from this account?]
     PB --> R[Recon<br/><i>sonnet</i>: git state, ecosystem, the check command, today's date]
     R --> S[Spec<br/><i>opus</i>: brainstorming doctrine → docs/specs/…md, committed]
-    S --> SR[Spec review<br/><i>opus</i> attacks with evidence → <i>opus</i> folds in or refutes]
+    S --> SR[Spec review<br/><i>opus</i> attacks with evidence, then folds in what survives re-verification]
     SR --> Q1{owner<br/>questions?}
     Q1 -- yes --> P1[[pause · ask the owner · resume with answers]]
     Q1 -- no --> P
     P1 --> P[Plan<br/><i>opus</i>: writing-plans doctrine → docs/plans/…md, committed]
-    P --> PR[Plan review<br/><i>opus</i> opens every line range, compiles every block, splices a task → <i>opus</i> folds in]
+    P --> PR[Plan review<br/><i>opus</i> opens every line range, compiles every block, greps every fixture — runs no tests — then folds in]
     PR --> Q2{owner<br/>questions?}
     Q2 -- yes --> P2[[pause · ask · resume]]
-    Q2 -- no --> D
-    P2 --> D[Decision record<br/>every decision, AI or owner, written into both documents and committed]
-    D --> SL[Slice<br/><i>opus</i>: one task = one file-disjoint slice]
+    Q2 -- no --> SL
+    P2 --> SL[Slice<br/><i>opus</i>: one task = one file-disjoint slice]
     SL --> C{cost gate<br/>USD at API list prices}
     C -- approve --> IM[Implement<br/><i>sonnet</i>, one fresh agent per slice, TDD, chains serialised, groups in parallel]
     C -- stop --> X([documents committed, no code])
@@ -47,12 +46,11 @@ flowchart TD
 | Stage | Model | What it produces | Gate |
 |---|---|---|---|
 | Probe | both | one trivial answer per pinned model | a model this account cannot use → stop, for cents |
-| Recon | Sonnet | git state, ecosystem, the one check command, today's date, the docs convention | not a repo, dirty tree or the trunk → stop |
+| Recon | Sonnet | git state, ecosystem, the one check command (the fastest real one, run once under a time cap), today's date, the docs convention | not a repo, dirty tree or the trunk → stop |
 | Spec | Opus | `docs/specs/YYYY-MM-DD-<slug>.md`, committed; small decisions recorded, big ones escalated | |
-| Spec review + fold-in | Opus + Opus | findings with evidence; each folded in or refuted with evidence | unanswered owner questions → **pause** |
+| Spec review | Opus | findings with evidence; the same lane folds in what survives its re-verification and withdraws the rest, with evidence | unanswered owner questions → **pause** |
 | Plan | Opus | `docs/plans/YYYY-MM-DD-<slug>.md`, committed; one task per future slice, real code, measured line ranges | |
-| Plan review + fold-in | Opus + Opus | line ranges opened, code blocks compiled, a task spliced into a scratch worktree; fold-in | unanswered owner questions → **pause** |
-| Decision record | Sonnet | one table of every decision, by whom and why, written into both documents and committed | |
+| Plan review | Opus | line ranges opened, code blocks compiled, fixtures and signatures grepped — no tests run, no worktree; then the fold-in | unanswered owner questions → **pause** |
 | Slice | Opus | one task = one slice, pointers not pastes, chains longer than four merged | |
 | Cost gate | — | spent so far, ahead with a low–high band, total, at API list prices | **pause** until approved |
 | Implement | Sonnet | one fresh agent per slice; a commit each | |
@@ -66,8 +64,8 @@ the adversary read the diff, ran the check and found nothing, no scope was left 
 no implementer touched a file another slice had declared, and nothing was uncommitted at
 review time — otherwise `not_ok` lists the reasons. A lane that returns nothing or throws
 — primary and fallback alike — is recorded in `lane_errors`; a slice with no implementer
-result is named in `not_implemented`; a document reviewer, fold-in author, answers author
-or recorder that returns nothing stops the run before any code is built; an adversary
+result is named in `not_implemented`; a document reviewer or answers author that
+returns nothing stops the run before any code is built; an adversary
 that never returned makes the run `ok:false` with `review_missing:true` rather than
 clean; and a finding whose patch failed, was disputed or was not signed off stays on the
 orchestrator's list until a re-review explicitly re-raises it. The turn's token budget,
@@ -154,7 +152,7 @@ the check on the tree as it stands after the implement phase, not checked out pe
 there is no per-slice verifier (see the changelog for v1.3.0). The
 runtime's worktree isolation is not used because each slice's commits would land on a
 different worktree. Recon runs the check commands it finds before any gate; launch only on
-repos whose scripts you would run by hand. The front half (spec, plan, their reviews, the recorder) has been run against a
+repos whose scripts you would run by hand. The front half (spec, plan, their reviews) has been run against a
 stubbed runtime and in one small live run; its token-profile rows are still assumptions and
 are labelled so in the estimate.
 
@@ -162,8 +160,8 @@ are labelled so in the estimate.
 
 The stages carry the doctrine of the [superpowers](https://github.com/obra/superpowers)
 skills by Jesse Vincent (MIT): brainstorming for the spec writer, writing-plans for the
-plan writer, the spec and plan reviewer templates, receiving-code-review for the fold-in
-authors, test-driven-development and verification-before-completion for implementers,
+plan writer, the spec and plan reviewer templates, receiving-code-review for the reviewers'
+fold-in half, test-driven-development and verification-before-completion for implementers,
 systematic-debugging for patchers, and the code-reviewer calibration for every judge. They
 are copied into the engine so an install without the plugin behaves identically. Only the
 interactive parts were adapted: there is no approval gate inside a run, and "ask your

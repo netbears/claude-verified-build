@@ -1,6 +1,6 @@
 ---
 name: verified-build
-description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Opus writes the spec, adversarially reviews it and folds the findings in, then writes the implementation plan, reviews and folds that in; then Sonnet writes the code in parallel waves of 15, Opus adversarially reviews the combined diff and re-runs the repo's check command, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
+description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Opus writes the spec and a second Opus adversarially reviews it and folds its findings in, then the same for the implementation plan; then Sonnet writes the code in parallel waves of 15, Opus adversarially reviews the combined diff and re-runs the repo's check command, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
 ---
 
 # /verified-build — spec it, plan it, write it cheap, then attack it
@@ -15,26 +15,29 @@ pass leaves standing is yours to close by hand, not a second round's.
 
 | `from` | `task` is | the engine does |
 |---|---|---|
-| `idea` (default) | a paragraph, a prompt, a failing test, a one-line idea | spec → spec review → fold-in → plan → plan review → fold-in → slice → build |
-| `spec` | a finished spec: its path, or its text | plan → plan review → fold-in → slice → build |
+| `idea` (default) | a paragraph, a prompt, a failing test, a one-line idea | spec → spec review (folds in) → plan → plan review (folds in) → slice → build |
+| `spec` | a finished spec: its path, or its text | plan → plan review (folds in) → slice → build |
 | `plan` | a finished, already-reviewed plan: its path, or its text | slice → build (this week's shape) |
 
 Every document the engine writes is **committed on the branch** as it goes, in the
 repo's own naming (`docs/specs/YYYY-MM-DD-<slug>.md` and `docs/plans/…` unless Recon
 finds a different convention or you pass `specDir` / `plansDir`), and the branch is what
-you merge — so the final spec and plan land on the trunk with the code. Before the first
-line of code, a recorder writes a **"## Decision record"** into both documents: one
-table of every decision behind the build — the spec writer's, the plan writer's, each
-fold-in's, and the owner's answers — numbered, with who took it and why, and resolves
-every "pending owner" marker. `documents.decision_record.commit_sha` is that commit; a
-recorder that returns nothing stops the run (`stage:'record'`) before any code is built,
-as does a document reviewer or fold-in author that returns nothing (`stage:'spec-review'`
-/ `'plan-review'`) or an author who could not record the owner's answers. Each gets one
-adversarial review round (`docRounds`) by an Opus reviewer that must bring evidence —
-for a plan, that means opening every cited line range, compiling every code block and,
-where cheap, splicing a task into a scratch worktree — and one fold-in pass by an Opus
-author that verifies each finding before acting on it and refutes with evidence what
-does not hold.
+you merge — so the final spec and plan land on the trunk with the code. Every decision
+behind the build is in the documents' own tables — the spec writer's "Decisions taken
+without the owner", the plan's "Decisions taken by the plan", each review's "Fold-in
+record", and "Decisions taken by the owner" — and, in order, in `documents.decisions`.
+(A consolidated "## Decision record" lane existed until 2026-09-12; it re-wrote 45
+decisions already in those tables and cost six minutes.) A document reviewer that
+returns nothing stops the run (`stage:'spec-review'` / `'plan-review'`) before any code
+is built, as does an author who could not record the owner's answers. Each document gets
+one adversarial round (`docRounds`) by an Opus reviewer that must bring evidence — for a
+plan, that means opening every cited line range, compiling every code block and checking
+every fixture and signature by grep, but **never running the tests or splicing a task into
+a worktree**: the implementers run every test for real a phase later — and then, in the
+same lane, folds in what survives its own re-verification and withdraws the rest with the
+evidence. A finding that would reverse a recorded owner decision is withdrawn on that
+ground. (Until 2026-09-12 the fold-in was a second Opus lane per document; measured, it was
+16 of the front half's 92 minutes and refuted 0 of 17 findings.)
 
 **The owner is asked the questions that are theirs, and nothing else.** A spec or
 plan writer decides the small things the way a careful colleague would and records each
@@ -54,7 +57,7 @@ The plan may not silently reverse one; a reviewer who tries is refuted on that g
 The stages carry the superpowers skills' doctrine, copied into the engine so the pair
 stays self-contained (MIT, Jesse Vincent): brainstorming for the spec writer,
 writing-plans for the plan writer, the spec and plan reviewer templates sharpened with
-what this week's reviews caught, receiving-code-review for the fold-in authors, TDD
+what this week's reviews caught, receiving-code-review for the reviewers' fold-in half, TDD
 plus verification-before-completion for implementers, systematic-debugging for
 patchers, and the code-reviewer calibration for every judge. Only the interactive parts
 were adapted: there is no approval gate and nobody to ask.
@@ -219,7 +222,7 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 |---|---|---|
 | `task` | — | required; the idea, the spec or the plan — text or a path, see `from` |
 | `from` | `idea` | `idea` \| `spec` \| `plan`: where the run starts |
-| `docRounds` | `1` | adversarial review + fold-in rounds per document the engine writes (0 = write, no review; max 2) |
+| `docRounds` | `1` | adversarial review-and-fold-in rounds per document the engine writes (0 = write, no review; max 2) |
 | `specDir` / `plansDir` | repo convention, else `docs/specs` / `docs/plans` | where the engine writes its documents |
 | `spec` / `plan` | — | the path of an existing document when `from` is `spec` or `plan` and `task` is not itself that path |
 | `pauseForOwner` | `true` | pause and return the owner questions a writer or reviewer escalated; `false` = the recommended option stands, no pause |
@@ -237,7 +240,7 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `allowDirty` | `false` | run despite a dirty tree — only when those changes are genuinely part of the task |
 | `allowTrunk` | `false` | run on the shared trunk. Almost always the wrong answer; branch instead |
 | `fallback` | `true` | retry a lane once on the other tier when its primary model returns nothing (terminal API error such as `529 Overloaded`). `false` disables |
-| `judgeFallback` | `fable` | model the Opus judge lanes (spec and plan writers, document reviewers and fold-ins, slicer, adversary) retry on |
+| `judgeFallback` | `fable` | model the Opus judge lanes (spec and plan writers, document reviewers, slicer, adversary) retry on |
 | `coderFallback` | `opus` | model the Sonnet lanes (recon, implement, patch) retry on |
 
 Pass a plain string instead of an object and it is taken as `task`.
@@ -328,9 +331,8 @@ without `executed:true` is treated as not clean (the reviewer's own word is kept
   repo, git missing) and what to do about it, rather than describing it as a failed build.
 - `stage:'spec'` / `'plan'` — a document writer returned nothing after its fallback, or
   the author recording the owner's answers did (the document still says "pending owner").
-- `stage:'spec-review'` / `'plan-review'` — a document reviewer or fold-in author
+- `stage:'spec-review'` / `'plan-review'` — a document reviewer
   returned nothing; the document is committed but that gate never ran. Relaunch.
-- `stage:'record'` — the recorder returned nothing; no code was built. Relaunch.
 - `stage:'implement'` / `'review'` with an `error` naming the token budget —
   the turn's "+Nk" ceiling was nearly spent and the engine stopped between phases with a
   partial report rather than a wall of lost lanes; `lane_errors` and whatever ran are in it.
@@ -344,12 +346,11 @@ without `executed:true` is treated as not clean (the reviewer's own word is kept
 Otherwise the return value is structured. Report these, and in this order:
 
 0. **`documents.decisions`** — every decision behind the build, whoever took it: the
-   spec writer's, the plan writer's, and the owner's answers; the same list is the
-   "## Decision record" section committed into both documents
-   (`documents.decision_record`); and `documents.spec_path`
-   / `documents.plan_path`, committed on the branch, plus each document's reviews and
-   fold-ins (`spec_reviews`, `plan_reviews`: findings, what was folded, what was
-   refuted and why). Report the decisions **before** anything about the code — a
+   spec writer's, the plan writer's, each review's fold-ins and withdrawals, and the
+   owner's answers, in order; the documents carry the same decisions in their own
+   tables. Then `documents.spec_path` / `documents.plan_path`, committed on the branch,
+   plus each document's review (`spec_reviews`, `plan_reviews`: findings with their
+   disposition — `fold.folded`, `fold.refuted` with the evidence — and the commit). Report the decisions **before** anything about the code — a
    build on a decision the owner would have made differently is a wrong build,
    however clean. Where `from` was `plan` this block is empty.
 1. **`final_review.clean`** — the headline. `true` means the last adversarial pass

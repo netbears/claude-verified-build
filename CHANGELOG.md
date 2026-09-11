@@ -1,5 +1,39 @@
 # Changelog
 
+## v1.4.0 — 2026-09-12
+
+**The front half, measured and trimmed.** One full run on 2026-09-11 (five slices, one owner
+question, one patch round), reconstructed from its 29 agent transcripts: 223 minutes wall
+clock, of which 73 waiting for the owner and 150 with agents active — and 92 of those 150 in
+the front half. Recon 7.4, spec 9.4, spec review 8.4 + fold-in 9.3, plan 16.8, plan review
+22.4 + fold-in 7.1, decision record 5.8 + plan index 0.4, slice 2.2. Four changes:
+
+- **Recon runs one check, once, under `timeout 180`,** the fastest real one, and reports the
+  rest unexecuted. It used to run every command it found; on that run it started the full
+  suite in the background and spent half its 67 tool calls watching the process (ps, /proc,
+  strace, pg_stat_activity). The adversary re-runs the check anyway.
+- **The plan review reads and compiles; it never runs the tests or splices a task into a
+  worktree.** Its three real findings on that run were ones the implementers hit in their own
+  red-green cycle a phase later; the worktree work was 22 minutes and 77 tool calls.
+- **Review and fold-in are one lane per document.** The reviewer lists its findings with
+  evidence, then re-verifies each before folding it in; a finding that does not survive, or
+  that would reverse a recorded owner decision, is `withdrawn` with the reason. The separate
+  fold-in author was a second cold read of the document and the repo, 16 minutes on that run,
+  and refuted 0 of 17 findings. `spec_reviews[].fold` / `plan_reviews[].fold` keep their
+  shape (`folded`, `refuted`, `commit_sha`), derived from the same agent's dispositions.
+- **The consolidated decision recorder is gone.** It re-wrote 45 decisions that already sat in
+  the documents' own tables (the spec writer's, the plan's, each fold-in record, the owner's
+  answers). `documents.decisions` still carries every one in order; `documents.decision_record`
+  and `stage:'record'` are gone. With `pauseForOwner:false` the writers and reviewers now
+  write the recommended option in as the decision, marked "owner not asked", instead of
+  leaving a "pending owner" marker for a recorder to resolve. The plan is still re-measured
+  when a fold-in or the owner's answers committed into it.
+
+Expected on that run: the front half from 92 to about 60 minutes, the whole active run from
+150 to about 95 (with v1.3.0's cuts). The `doc_review` profile row now covers both halves of
+the lane; `doc_fold` and `record` are gone, and `doc_review` counts the plan's review too (it
+counted only the spec's before). 68 tests.
+
 ## v1.3.0 — 2026-09-12
 
 **The per-slice verifier and the per-patch verifier are gone; the adversary runs the check.**
