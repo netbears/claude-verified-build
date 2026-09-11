@@ -309,7 +309,7 @@ const VERIFY_SCHEMA = {
     commands_run: { type: 'string', description: 'The exact command(s) you ran, newline-separated. Empty if you ran none.' },
     output_tail: { type: 'string', description: 'The real last ~20 lines of that output. Never reconstructed from memory.' },
     checks_available: { type: 'boolean', description: 'False if this repo genuinely has nothing executable to run — which is a fact about the repo, not a failure by the implementer.' },
-    dirty_paths: { type: 'string', description: 'The output of `git status --porcelain`, trimmed, at the moment you ran the check. Empty if the tree was clean. A check that passed on uncommitted edits proves nothing about the commits.' },
+    dirty_paths: { type: 'string', description: 'The output of `git status --porcelain`, verbatim, at the moment you ran the check. Empty if the tree was clean. A check that passed on uncommitted edits proves nothing about the commits.' },
     problems: {
       type: 'array',
       items: {
@@ -335,7 +335,7 @@ const REVIEW_SCHEMA = {
   properties: {
     clean: { type: 'boolean' },
     diff_reviewed: { type: 'boolean', description: 'True only if you actually ran the diff command and read the output.' },
-    dirty_paths: { type: 'string', description: 'The output of `git status --porcelain`, trimmed. Empty if the tree was clean. Anything uncommitted here is work the diff you reviewed does not contain.' },
+    dirty_paths: { type: 'string', description: 'The output of `git status --porcelain`, verbatim. Empty if the tree was clean. Anything uncommitted here is work the diff you reviewed does not contain.' },
     findings: {
       type: 'array',
       items: {
@@ -458,13 +458,13 @@ function expandBraces(p) {
 // A slice's declared footprint. Under-detection is the dangerous direction: it
 // puts two agents inside one file at the same time. Over-detection costs only
 // wall-clock, never context — so when in doubt, collide.
-function declaredFiles(s) {
+function declaredFiles(s, quiet) {
   const out = new Set()
   for (const raw of s.files || []) {
     for (const p of expandBraces(String(raw || ''))) {
       const f = normPath(p)
       if (!f) continue
-      if (f.includes('*')) {
+      if (f.includes('*') && !quiet) {
         log('WARNING: slice ' + s.id + ' declared a glob (' + f + ') — it collides with every declared path it could match')
       }
       out.add(f)
@@ -534,7 +534,7 @@ function footprintViolations(built, groups) {
   const groupOf = (id) => groups.find((g) => g.slices.some((x) => x.id === id))
   for (const b of built) {
     if (!b || !b.impl) continue
-    const declared = [...declaredFiles(b.slice)]
+    const declared = [...declaredFiles(b.slice, true)]
     const mine = groupOf(b.slice.id)
     for (const r of b.impl.slice_results || []) {
       for (const raw of r.files_touched || []) {
@@ -2084,7 +2084,7 @@ if (plan.uncovered && plan.uncovered.length) notOk.push('the slicer left scope u
 if (violations.length) notOk.push(violations.length + ' undeclared file(s) touched inside another group\'s footprint: ' + violations.map((v) => v.slice + ' -> ' + v.file).join(', '))
 if (uncommittedAtReview) notOk.push('uncommitted changes in the tree at review time (not in the reviewed diff): ' + uncommittedAtReview.slice(0, 300))
 if (review && review.diff_reviewed !== true) notOk.push('the final review did not read the diff (diff_reviewed:false)')
-if (review && review.clean !== true) notOk.push('the final review is not clean: ' + openFindings.length + ' finding(s) open')
+if (review && openFindings.length) notOk.push('the final review is not clean: ' + openFindings.length + ' finding(s) open')
 if (notOk.length) log('NOT OK — ' + notOk.join('; '))
 
 return {
