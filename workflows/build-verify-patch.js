@@ -3,6 +3,7 @@ export const meta = {
   description: 'From an idea: Opus writes the spec, adversarially reviews and folds it in, writes the plan, reviews and folds that in; then Sonnet implements in waves of 15, Opus verifies every commit, Opus adversarially reviews the combined diff, and one patch round closes critical/major findings',
   whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix.',
   phases: [
+    { title: 'Probe', detail: 'one trivial call per model: are sonnet and opus enabled for this account?' },
     { title: 'Recon', detail: 'sonnet reads the repo: git state, ecosystem, how it verifies itself', model: 'sonnet' },
     { title: 'Spec', detail: 'opus turns the idea into a spec (brainstorming doctrine), commits it', model: 'opus' },
     { title: 'Spec review', detail: 'opus adversarially reviews the spec; opus folds the findings in', model: 'opus' },
@@ -70,25 +71,39 @@ const PLAN_PATH_IN = String(input.plan || '').trim()
 const APPROVE_ESTIMATE = input.approveEstimate === true
 const MAX_USD = Number(input.maxUsd) > 0 ? Number(input.maxUsd) : null
 // USD per million tokens, Anthropic first-party API list prices (cached 2026-06-24):
-// input / output / cache read / cache write (5-minute, 1.25x input). Override with
-// args.prices = { sonnet: {...}, opus: {...}, fable: {...} } when the list changes.
-const PRICES = {
+// input / output / cache read (0.1x input) / cache write (5-minute, 1.25x input).
+// Override with args.prices = { sonnet: {...}, opus: {...}, fable: {...} } when the
+// list changes; an override is merged PER FIELD, so `{sonnet: {in: 3}}` changes one
+// number and keeps the rest — replacing the whole row used to turn every cost into
+// null, and a null total passed any maxUsd.
+const DEFAULT_PRICES = {
   sonnet: { in: 2, out: 10, cache_read: 0.20, cache_write: 2.50 },
   opus: { in: 5, out: 25, cache_read: 0.50, cache_write: 6.25 },
-  fable: { in: 10, out: 50, cache_read: 0.25, cache_write: 12.50 },
-  ...(input.prices && typeof input.prices === 'object' ? input.prices : {}),
+  fable: { in: 10, out: 50, cache_read: 1.00, cache_write: 12.50 },
 }
+const PRICES = mergePrices(DEFAULT_PRICES, input.prices)
 const PAUSE_FOR_OWNER = input.pauseForOwner !== false
-const ANSWERS = Array.isArray(input.answers)
-  ? input.answers.filter((a) => a && a.id).map((a) => ({ id: String(a.id), answer: String(a.answer || '') }))
-  : (input.answers && typeof input.answers === 'object'
-    ? Object.keys(input.answers).map((k) => ({ id: String(k), answer: String(input.answers[k] || '') }))
-    : [])
+// Sorted by id: the prompt that records the owner's answers embeds them, and a resume
+// replays an agent only while its prompt is byte-identical — the order the orchestrator
+// happened to pass them in must not decide whether the author runs again.
+const ANSWERS = parseAnswers(input.answers)
 const MAX_SLICES = Number(input.maxSlices) > 0 ? Math.min(Number(input.maxSlices), 20) : 15
 const MAX_PATCH_PER_ROUND = 15
 const CODER = 'sonnet'
 const JUDGE = 'opus'
-const EFFORT = String(input.effort || 'high')
+const EFFORT = ['low', 'medium', 'high', 'xhigh', 'max'].includes(input.effort) ? input.effort : 'high'
+// One trivial call per primary model before anything is spent. On an API-key (non-
+// subscription) account a model alias may be disabled for the organisation, and the
+// engine would otherwise discover that fifteen agents deep as a wall of nulls.
+const PROBE_MODELS = input.probeModels !== false
+// Every lane that fails or throws is recorded here and reported; nothing is silent.
+const laneErrors = []
+// A task that is only a path (from:'spec' or 'plan') must be READ, not quoted: a
+// verifier handed "OVERALL TASK: docs/specs/x.md" and nothing else has no bar to hold
+// the work to.
+const TASK_TEXT = looksLikePath(TASK)
+  ? 'The task is the document at `' + TASK.trim() + '`. Read it whole before anything else; it is the bar the work must clear.'
+  : TASK
 // Safety gates. Both default ON: several agents commit concurrently into the
 // session's working directory, so a dirty tree or a shared trunk is a real
 // hazard rather than a style preference. Callers who know better can opt out.
@@ -115,8 +130,14 @@ function fallbackFor(model) {
   return null
 }
 
+// Never throws. agent() returns null on a terminal API error or a skip, but it THROWS
+// once the turn's token budget is exhausted (and on a few runtime errors); inside
+// parallel() a throw silently turned a whole implement group into null, and at top
+// level it aborted the run with no report. Every failure now lands in laneErrors and
+// the lane returns null, which every caller already handles.
 async function callAgent(prompt, opts) {
   const o = opts || {}
+  const label = o.label || 'agent'
   let first = null
   let firstError = null
   try {
@@ -125,17 +146,33 @@ async function callAgent(prompt, opts) {
     firstError = e
   }
   if (first !== null && first !== undefined) return first
+  const why = firstError ? String(firstError.message || firstError).slice(0, 160) : 'returned nothing (terminal API error, or skipped)'
+  laneErrors.push({ label: label, model: o.model || null, error: why })
   const fb = FALLBACK ? fallbackFor(o.model) : null
   if (!fb || fb === o.model) {
-    if (firstError) throw firstError
-    return first
+    log(label + ': ' + (o.model || 'default') + ' ' + why + ' - no fallback tier, lane lost')
+    return null
   }
-  const label = o.label || 'agent'
-  log(label + ': ' + (o.model || 'default') + ' returned nothing' +
-    (firstError ? ' (' + String(firstError.message || firstError).slice(0, 120) + ')' : ' (terminal API error, or skipped)') +
-    ' - retrying once on ' + fb)
+  log(label + ': ' + (o.model || 'default') + ' ' + why + ' - retrying once on ' + fb)
   fallbacksUsed.push({ label: label, primary: o.model || null, fallback: fb })
-  return agent(prompt, { ...o, model: fb, label: label + ':fb-' + fb })
+  try {
+    const second = await agent(prompt, { ...o, model: fb, label: label + ':fb-' + fb })
+    if (second === null || second === undefined) {
+      laneErrors.push({ label: label + ':fb-' + fb, model: fb, error: 'returned nothing (terminal API error, or skipped)' })
+      log(label + ': the fallback on ' + fb + ' returned nothing too - lane lost')
+    }
+    return second === undefined ? null : second
+  } catch (e) {
+    laneErrors.push({ label: label + ':fb-' + fb, model: fb, error: String(e.message || e).slice(0, 160) })
+    log(label + ': the fallback on ' + fb + ' threw (' + String(e.message || e).slice(0, 120) + ') - lane lost')
+    return null
+  }
+}
+
+// The turn's token target ("+500k") is a hard ceiling: past it every agent() throws.
+// Checked between phases so the run returns a report instead of a wall of lost lanes.
+function budgetLeft(need) {
+  return !(budget.total && budget.remaining() < need)
 }
 
 // Every ecosystem names its own verification differently, and the repo — not
@@ -308,11 +345,19 @@ const REVIEW_SCHEMA = {
           claim: { type: 'string', description: 'One sentence: the defect.' },
           failure_scenario: { type: 'string', description: 'Concrete inputs/state -> wrong output or crash. "This is fragile" is not a finding.' },
           fix_hint: { type: 'string' },
+          re_raises: { type: 'string', description: 'Only in a re-review: the id of the EARLIER finding this one re-raises because its patch did not close it (e.g. "r0:F2"). Omit for a new finding.' },
         },
       },
     },
     summary: { type: 'string' },
   },
+}
+
+const PROBE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['ok'],
+  properties: { ok: { type: 'boolean' } },
 }
 
 const PATCH_SCHEMA = {
@@ -333,22 +378,6 @@ const PATCH_SCHEMA = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Run items through stages in waves of `size`, so at most `size` agents are
-// ever live. Each wave is a barrier; within a wave, pipeline() means an item
-// moves to stage 2 as soon as ITS stage 1 finishes.
-async function waves(items, size, ...stages) {
-  const out = []
-  for (let i = 0; i < items.length; i += size) {
-    const chunk = items.slice(i, i + size)
-    if (items.length > size) {
-      log('wave ' + (Math.floor(i / size) + 1) + '/' + Math.ceil(items.length / size) + ' (' + chunk.length + ' item(s))')
-    }
-    const got = await pipeline(chunk, ...stages)
-    out.push(...got)
-  }
-  return out
-}
-
 // Run items through ONE stage in waves of `size`, at most `size` agents live.
 // Used where the two stages cannot be pipelined per item: implement is
 // serialised within a group, while verify is free to run flat out.
@@ -367,19 +396,39 @@ async function wavesOne(items, size, fn, what) {
 }
 
 // Repo-relative paths for the same file arrive spelled differently ("./src/a.py",
-// "src/a.py", "src\\a.py", "src/./a.py", "/src/a.py"). Conflict detection is
-// exact-match on these strings, so an unnormalised pair reads as disjoint and two
+// "src/a.py", "src\\a.py", "src/./a.py", "/src/a.py", "src/../src/a.py"). Conflict
+// detection compares these strings, so an unnormalised pair reads as disjoint and two
 // agents get sent at one file — the exact failure the grouping exists to prevent.
-// Collapse separators BEFORE stripping "./", and strip a leading "/" as well:
-// otherwise ".//src/a.py" lands on "/src/a.py" and silently misses "src/a.py".
+// Separators are collapsed, "." and ".." segments resolved, leading and trailing "/"
+// dropped.
 function normPath(p) {
-  let s = String(p || '').trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/')
-  let prev
-  do {
-    prev = s
-    s = s.replace(/\/\.\//g, '/').replace(/^\.\//, '')
-  } while (s !== prev)
-  return s.replace(/^\/+/, '').replace(/\/+$/, '')
+  const raw = String(p || '').trim().replace(/\\/g, '/')
+  const out = []
+  for (const seg of raw.split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') { out.pop(); continue }
+    out.push(seg)
+  }
+  return out.join('/')
+}
+
+// Two declared paths overlap when they are the same file, when one is a directory
+// holding the other ("modules/vpc" vs "modules/vpc/main.tf" — the slicer is told to
+// declare directories for Terraform modules), or when one is a glob that could match
+// the other. A glob is turned into a regex where `**` spans directories and `*` one
+// segment; a glob against a glob overlaps when either's literal prefix covers the
+// other. Under-detection sends two agents at one file, so when in doubt, overlap.
+function pathsOverlap(a, b) {
+  if (a === b) return true
+  if (a.startsWith(b + '/') || b.startsWith(a + '/')) return true
+  const ga = a.includes('*'), gb = b.includes('*')
+  if (!ga && !gb) return false
+  const globRe = (g) => new RegExp('^' + g.split('**').map((part) =>
+    part.split('*').map((lit) => lit.replace(/[.+^${}()|[\]\\?]/g, '\\$&')).join('[^/]*')).join('.*') + '(/.*)?$')
+  if (ga && !gb) return globRe(a).test(b)
+  if (gb && !ga) return globRe(b).test(a)
+  const pa = a.slice(0, a.indexOf('*')), pb = b.slice(0, b.indexOf('*'))
+  return pa.startsWith(pb) || pb.startsWith(pa)
 }
 
 // Planners write `src/{a,b}.py` for two files. Expand it, or the pair compares
@@ -400,7 +449,7 @@ function declaredFiles(s) {
       const f = normPath(p)
       if (!f) continue
       if (f.includes('*')) {
-        log('WARNING: slice ' + s.id + ' declared a glob (' + f + ') — a glob cannot be proven disjoint')
+        log('WARNING: slice ' + s.id + ' declared a glob (' + f + ') — it collides with every declared path it could match')
       }
       out.add(f)
     }
@@ -412,32 +461,38 @@ function declaredFiles(s) {
 // group; the group's slices run SEQUENTIALLY — one agent each, never merged
 // into one context — and groups run in parallel. A slice with no declared
 // files gets its own group and a warning, because an unknown footprint cannot
-// be proven disjoint.
+// be proven disjoint. Within a group the slices keep the PLAN'S order: a slice
+// that bridges two earlier groups used to be appended ahead of the second
+// group's slices, so Task 3 ran before the Task 2 it consumed from.
 function groupByFileConflict(slices) {
   const groups = []
-  for (const s of slices) {
+  slices.forEach((s, index) => {
     const files = declaredFiles(s)
+    const entry = { slice: s, index }
     if (files.size === 0) {
       log('WARNING: slice ' + s.id + ' declared no files — running it alone, footprint unknown')
-      groups.push({ slices: [s], files })
-      continue
+      groups.push({ entries: [entry], files })
+      return
     }
-    const hits = groups.filter((g) => [...files].some((f) => g.files.has(f)))
+    const hits = groups.filter((g) => [...files].some((f) => [...g.files].some((h) => pathsOverlap(f, h))))
     if (hits.length === 0) {
-      groups.push({ slices: [s], files })
-      continue
+      groups.push({ entries: [entry], files })
+      return
     }
     const target = hits[0]
-    target.slices.push(s)
+    target.entries.push(entry)
     for (const f of files) target.files.add(f)
     for (const extra of hits.slice(1)) {
-      target.slices.push(...extra.slices)
+      target.entries.push(...extra.entries)
       for (const f of extra.files) target.files.add(f)
       const at = groups.indexOf(extra)
       if (at >= 0) groups.splice(at, 1)
     }
-  }
+  })
   return groups
+    .map((g) => ({ ...g, entries: g.entries.sort((a, b) => a.index - b.index) }))
+    .sort((a, b) => a.entries[0].index - b.entries[0].index)
+    .map((g) => ({ slices: g.entries.map((e) => e.slice), files: g.files }))
 }
 
 function sliceBlock(s) {
@@ -453,6 +508,71 @@ function severityRank(sev) {
   if (sev === 'critical') return 0
   if (sev === 'major') return 1
   return 2
+}
+
+// A price override is merged per field and only where the value is a finite number;
+// a model the defaults do not know is ignored (the estimate has no profile row for it).
+function mergePrices(defaults, override) {
+  const out = {}
+  for (const model of Object.keys(defaults)) {
+    out[model] = { ...defaults[model] }
+    const row = override && typeof override === 'object' && override[model] && typeof override[model] === 'object' ? override[model] : null
+    if (!row) continue
+    for (const k of Object.keys(defaults[model])) {
+      if (Number.isFinite(row[k])) out[model][k] = row[k]
+    }
+  }
+  return out
+}
+
+// args.answers as a list of {id, answer} or an {id: answer} object, sorted by id.
+function parseAnswers(raw) {
+  let list = []
+  if (Array.isArray(raw)) {
+    list = raw.filter((a) => a && a.id).map((a) => ({ id: String(a.id), answer: String(a.answer || '') }))
+  } else if (raw && typeof raw === 'object') {
+    list = Object.keys(raw).map((k) => ({ id: String(k), answer: String(raw[k] || '') }))
+  }
+  return list.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
+// Everything the orchestrator must close by hand, at EVERY severity, sorted critical
+// first: what the final review left standing; every finding a round handed off (below
+// PATCH_SEVERITY) or deferred (past the per-round cap); and every finding a round tried
+// to patch that did not come back closed — the patcher returned nothing, failed, or
+// disputed it, or the patch verifier would not sign it off. A later review that simply
+// did not mention one of those has not closed it; only a final-review finding whose
+// `re_raises` names it supersedes it (then the newer entry stands and the old one is
+// dropped). With no final review at all, nothing is treated as closed.
+function collectForOrchestrator(openFindings, rounds, hasFinalReview) {
+  const out = []
+  const seen = new Set()
+  const superseded = new Set()
+  const add = (f, source) => {
+    if (!f || !f.id || seen.has(f.id) || superseded.has(f.id)) return
+    seen.add(f.id)
+    out.push({ ...f, source })
+  }
+  for (const f of openFindings || []) {
+    if (f && f.re_raises) superseded.add(String(f.re_raises))
+    add(f, 'final review')
+  }
+  for (const r of rounds || []) {
+    for (const p of r.patched || []) {
+      const f = p && p.finding
+      if (!f) continue
+      const status = p.patch ? p.patch.status : null
+      const verified = p.verify ? p.verify.verified === true : false
+      if (!hasFinalReview) add(f, 'patched in round ' + r.round + ', but there was no final review to confirm it closed')
+      else if (!p.patch) add(f, 'no patch: the patcher returned nothing in round ' + r.round)
+      else if (status === 'disputed') add(f, 'disputed by the patcher in round ' + r.round + ' — judge the evidence: ' + String(p.patch.notes || '').slice(0, 300))
+      else if (status !== 'fixed') add(f, 'patch ' + status + ' in round ' + r.round)
+      else if (!verified) add(f, 'patched in round ' + r.round + ' but the patch verifier did not sign it off')
+    }
+    for (const f of r.handed_off || []) add(f, 'handed off in round ' + r.round + ' (below the auto-patch severity)')
+    for (const f of r.deferred || []) add(f, 'deferred in round ' + r.round + ' (past the per-round cap)')
+  }
+  return out.sort((a, b) => severityRank(a.severity) - severityRank(b.severity))
 }
 
 
@@ -621,33 +741,34 @@ const PROFILE = {
   answers: { model: JUDGE, cache: 8.0, write: 0.2, out: 0.015, measured: false },
   record: { model: CODER, cache: 3.0, write: 0.1, out: 0.005, measured: false },
   plan_index: { model: CODER, cache: 1.5, write: 0.05, out: 0.003, measured: false },
+  probe: { model: CODER, cache: 0.01, write: 0.005, out: 0.0002, measured: false },      // per model probed
 }
 
-function priceOf(model) {
-  return PRICES[model] || PRICES.opus
+function priceOf(prices, model) {
+  return prices[model] || prices.opus
 }
 
-function lineCost(row, n) {
-  const p = priceOf(row.model)
+function lineCost(row, prices, n) {
+  const p = priceOf(prices, row.model)
   const usd = n * (row.cache * p.cache_read + row.write * p.cache_write + row.out * p.out)
   return { agents: n, model: row.model, measured: row.measured,
     cache_mtok: +(n * row.cache).toFixed(1), write_mtok: +(n * row.write).toFixed(2), out_mtok: +(n * row.out).toFixed(3),
     usd: +usd.toFixed(2) }
 }
 
-function estimateRun(spent, ahead) {
+function estimateRun(profile, prices, spent, ahead) {
   // spent / ahead: { <profile key>: count }. Returns the breakdown and the totals.
   const lines = {}
   let spentUsd = 0
   let aheadUsd = 0
   let assumed = 0
   for (const [k, n] of Object.entries(spent)) {
-    if (!n || !PROFILE[k]) continue
-    const l = lineCost(PROFILE[k], n); lines['done:' + k] = l; spentUsd += l.usd; if (!l.measured) assumed += l.usd
+    if (!n || !profile[k]) continue
+    const l = lineCost(profile[k], prices, n); lines['done:' + k] = l; spentUsd += l.usd; if (!l.measured) assumed += l.usd
   }
   for (const [k, n] of Object.entries(ahead)) {
-    if (!n || !PROFILE[k]) continue
-    const l = lineCost(PROFILE[k], n); lines['ahead:' + k] = l; aheadUsd += l.usd; if (!l.measured) assumed += l.usd
+    if (!n || !profile[k]) continue
+    const l = lineCost(profile[k], prices, n); lines['ahead:' + k] = l; aheadUsd += l.usd; if (!l.measured) assumed += l.usd
   }
   return { lines, spent_usd: +spentUsd.toFixed(2), ahead_usd: +aheadUsd.toFixed(2), assumed_usd: +assumed.toFixed(2) }
 }
@@ -659,6 +780,36 @@ function estimateRun(spent, ahead) {
 // is both cheaper and more consistent — N agents guessing a test command
 // independently is N chances to disagree about what "passing" means.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Probe. One trivial, tool-free call per primary model. An API-key account may
+// have an alias disabled for its organisation; a subscription may sit on a plan
+// without one of the tiers. Either way the run must learn it here, for cents,
+// not after Recon and a spec have been paid for. No fallback: the point is to
+// know whether the PRIMARY works. Cached on resume like every other call.
+// ---------------------------------------------------------------------------
+if (PROBE_MODELS) {
+  phase('Probe')
+  const probeModels = [...new Set([CODER, JUDGE])]
+  const probes = await parallel(probeModels.map((m) => () =>
+    agent('Answer with the structured output ok:true. Use no tools, read nothing, run nothing.',
+      { label: 'probe:' + m, phase: 'Probe', model: m, effort: 'low', schema: PROBE_SCHEMA })
+      .catch((e) => ({ error: String(e.message || e).slice(0, 160) }))))
+  const dead = probeModels.filter((m, i) => !probes[i] || probes[i].ok !== true)
+  if (dead.length) {
+    const detail = probeModels.map((m, i) => m + ': ' + (probes[i] && probes[i].ok === true ? 'ok' : (probes[i] && probes[i].error) || 'returned nothing'))
+    log('PROBE FAILED — ' + detail.join(', '))
+    return {
+      ok: false,
+      stage: 'probe',
+      error: 'model(s) not usable from this session: ' + dead.join(', ') + '. On an API-key account, check that the model ' +
+        'is enabled for the organisation (console.anthropic.com → Settings → Limits/Models) and that ANTHROPIC_API_KEY is the right ' +
+        'key; on a subscription, that the plan includes it. Nothing was spent beyond these probes. Pass probeModels:false to skip.',
+      probes: Object.fromEntries(probeModels.map((m, i) => [m, probes[i]])),
+    }
+  }
+  log('probe: ' + probeModels.join(' and ') + ' answered')
+}
+
 phase('Recon')
 log('task: ' + TASK.slice(0, 160))
 
@@ -667,8 +818,9 @@ const recon = await callAgent(
     'You are RECON. You write no code and make no commits. Establish the ground truth the rest of this run depends on.',
     '',
     'The task that is about to be implemented here, for context only — do NOT start it:',
-    TASK,
+    TASK_TEXT,
     '',
+    '0. TOOLS. Run `git --version`. If git is missing, report is_git_repo:false and say so in dirty_summary.',
     '1. GIT STATE. Run these and report exactly what they say:',
     '   `git rev-parse --is-inside-work-tree`, `git rev-parse HEAD`,',
     '   `git rev-parse --abbrev-ref HEAD`, `git status --porcelain`',
@@ -713,7 +865,7 @@ if (recon.is_git_repo !== true) {
   return {
     ok: false,
     stage: 'recon',
-    error: 'not a git repository. Every lane here commits and diffs, so a repo is required. Run `git init` and make a first commit, or launch from inside the repo.',
+    error: 'not a git repository (or git is not installed — recon ran `git --version`; see dirty_summary). Every lane here commits and diffs, so a repo is required. Run `git init` and make a first commit, or launch from inside the repo.',
     recon: recon,
   }
 }
@@ -783,6 +935,7 @@ const documents = { from: FROM, spec: null, spec_reviews: [], plan: null, plan_r
 let SPEC_PATH = SPEC_PATH_IN || (FROM === 'spec' && looksLikePath(TASK) ? TASK.trim() : '')
 let PLAN_PATH = PLAN_PATH_IN || (FROM === 'plan' && looksLikePath(TASK) ? TASK.trim() : '')
 let planDoc = null
+let planReindexed = false
 
 function looksLikePath(t) {
   return /^[\w./-]+\.md$/.test(t.trim()) && !/\s/.test(t.trim())
@@ -966,6 +1119,19 @@ async function reviewAndFold(kind, docPath, extra) {
     out.push({ round: r, review, fold })
     if (!fold) break
     log(kind + ' fold-in round ' + r + ': ' + fold.folded.length + ' folded, ' + fold.refuted.length + ' refuted')
+    // A fold-in is a decision too: the author changed the document on a reviewer's word,
+    // or refused to. Both go into the decision record, so the owner can overturn either.
+    const byId = Object.fromEntries((review.findings || []).map((f) => [f.id, f]))
+    for (const id of fold.folded || []) {
+      const f = byId[id] || {}
+      documents.decisions.push({ stage: kind + '-fold', question: 'Review finding ' + id + (f.claim ? ': ' + f.claim : ''),
+        decision: 'folded in' + (f.fix ? ': ' + f.fix : ''), why: f.evidence ? 'reviewer\'s evidence: ' + f.evidence : 'the finding held' })
+    }
+    for (const ref of fold.refuted || []) {
+      const f = byId[ref.id] || {}
+      documents.decisions.push({ stage: kind + '-fold', question: 'Review finding ' + ref.id + (f.claim ? ': ' + f.claim : ''),
+        decision: 'refuted; document left as it was', why: ref.evidence || 'no evidence given' })
+    }
   }
   return out
 }
@@ -1077,8 +1243,8 @@ if (FROM === 'idea' || FROM === 'spec') {
   const appliedPlan = await applyAnswers('plan', PLAN_PATH, planQuestions)
   if (appliedPlan) log('plan: owner answers recorded (' + (appliedPlan.commit_sha || 'no commit') + ')')
   // Line ranges move under a fold-in; re-measure them for the slicer.
-  const folded = documents.plan_reviews.some((r) => r.fold && r.fold.commit_sha) || Boolean(appliedPlan && appliedPlan.commit_sha)
-  if (folded) {
+  planReindexed = documents.plan_reviews.some((r) => r.fold && r.fold.commit_sha) || Boolean(appliedPlan && appliedPlan.commit_sha)
+  if (planReindexed) {
     const remeasured = await callAgent(
       [
         'Read ' + PLAN_PATH + ' as it stands NOW and report every "### Task N" section in order with its files',
@@ -1087,7 +1253,8 @@ if (FROM === 'idea' || FROM === 'spec') {
       ].join('\n'),
       { label: 'plan-index', phase: 'Plan review', model: CODER, effort: 'low', schema: PLANDOC_SCHEMA }
     )
-    if (remeasured) { planDoc = remeasured; documents.plan = remeasured }
+    // Only the measurements are replaced; the plan writer's decisions stay on the record.
+    if (remeasured) { planDoc = { ...remeasured, decisions: planDoc.decisions || [] }; documents.plan = planDoc }
   }
 }
 
@@ -1103,7 +1270,10 @@ if (documents.spec || documents.plan) {
   const record = documents.decisions.map((d, i) => ({
     n: i + 1,
     stage: d.stage,
-    by: d.why === 'the owner\'s answer' ? 'owner' : (String(d.decision).includes('owner not asked') ? 'engine (recommended option stood, owner not asked)' : 'engine (' + d.stage + ' writer)'),
+    by: d.why === 'the owner\'s answer' ? 'owner'
+      : String(d.decision).includes('owner not asked') ? 'engine (recommended option stood, owner not asked)'
+      : String(d.stage).endsWith('-fold') ? 'engine (' + String(d.stage).replace('-fold', '') + ' fold-in author)'
+      : 'engine (' + d.stage + ' writer)',
     question: d.question, decision: d.decision, why: d.why,
   }))
   const targets = [documents.spec ? SPEC_PATH : null, documents.plan ? PLAN_PATH : null].filter(Boolean)
@@ -1152,7 +1322,7 @@ const plan = await callAgent(
     'You are the SLICER. You do not write the implementation — you map the plan\'s tasks onto slices so that several implementers can work at once without colliding.',
     '',
     'TASK:',
-    TASK,
+    TASK_TEXT,
     '',
     PLAN_INDEX,
     '',
@@ -1211,7 +1381,7 @@ const plan = await callAgent(
     '',
     'Write no code. Make no commits.',
   ].join('\n'),
-  { label: 'plan', phase: 'Plan', model: JUDGE, effort: EFFORT, schema: PLAN_SCHEMA }
+  { label: 'slice', phase: 'Slice', model: JUDGE, effort: EFFORT, schema: PLAN_SCHEMA }
 )
 
 if (!plan || !plan.slices || !plan.slices.length) {
@@ -1246,15 +1416,16 @@ if (groups.length === 1 && plan.slices.length > 2) {
 // The cost gate — what the rest of the run would cost at API list prices.
 // ---------------------------------------------------------------------------
 const spentCounts = {
+  probe: PROBE_MODELS ? new Set([CODER, JUDGE]).size : 0,
   recon: 1,
   spec: documents.spec ? 1 : 0,
   doc_review: documents.spec_reviews.filter((r) => r.review).length,
   doc_fold: documents.spec_reviews.filter((r) => r.fold).length + documents.plan_reviews.filter((r) => r.fold).length,
   plan_doc: documents.plan && FROM !== 'plan' ? 1 : 0,
   plan_review: documents.plan_reviews.filter((r) => r.review).length,
-  answers: (ANSWERS.length ? 1 : 0),
+  answers: (answersFor('spec').length ? 1 : 0) + (answersFor('plan').length ? 1 : 0),
   record: documents.decision_record ? 1 : 0,
-  plan_index: documents.plan_reviews.some((r) => r.fold && r.fold.commit_sha) ? 1 : 0,
+  plan_index: planReindexed ? 1 : 0,
   slice: 1,
 }
 const nSlices = plan.slices.length
@@ -1268,7 +1439,7 @@ const aheadCounts = {
   patch: MAX_ROUNDS * patchedPerRound,
   patch_verify: MAX_ROUNDS * patchedPerRound,
 }
-const est = estimateRun(spentCounts, aheadCounts)
+const est = estimateRun(PROFILE, PRICES, spentCounts, aheadCounts)
 const estimate = {
   currency: 'USD',
   basis: 'Anthropic first-party API list prices (a non-subscription licence), cached 2026-06-24; per-agent token profile measured over six runs on 2026-09-09..11. Subscription users are not billed per token: this is the size of the run at list prices.',
@@ -1284,12 +1455,14 @@ const estimate = {
   of_which_from_unmeasured_assumptions_usd: est.assumed_usd,
   output_tokens_actually_spent_this_turn: budget.spent(),
   breakdown: est.lines,
-  note: 'The low/high band is the spread the six measured runs showed at a given slice count. A fallback lane (Fable at ~2x Opus) is not in the figure; models.fallbacks.used in the final result says if one ran.',
+  note: 'The low/high band is a fixed 0.6x-1.6x of the expected figure, the rough spread the six measured runs showed; it is not a per-slice-count measurement. A fallback lane (Fable at ~2x Opus) is not in the figure; models.fallbacks.used in the final result says if one ran.',
 }
 log('COST ESTIMATE at API list prices: ~$' + est.spent_usd + ' spent so far, ~$' + est.ahead_usd +
   ' ahead ($' + estimate.ahead_low_usd + '–$' + estimate.ahead_high_usd + ') for ' + nSlices + ' slice(s), ' +
   MAX_ROUNDS + ' patch round(s); total ~$' + estimate.total_expected_usd)
-if (!APPROVE_ESTIMATE && !(MAX_USD !== null && estimate.total_expected_usd <= MAX_USD)) {
+// maxUsd only ever passes a FINITE total: a broken price table must pause, not wave through.
+const withinCeiling = MAX_USD !== null && Number.isFinite(estimate.total_expected_usd) && estimate.total_expected_usd <= MAX_USD
+if (!APPROVE_ESTIMATE && !withinCeiling) {
   log('PAUSED at the cost gate — relaunch with approveEstimate:true (or maxUsd) to build')
   return {
     ok: true,
@@ -1313,6 +1486,16 @@ if (!APPROVE_ESTIMATE && !(MAX_USD !== null && estimate.total_expected_usd <= MA
 // single 600k-token context and no verification until the very end.
 // ---------------------------------------------------------------------------
 phase('Implement')
+
+// The early return every phase below uses when the token budget is nearly gone.
+function outOfBudget(stage, extra) {
+  log('stopping before ' + stage + ': ' + Math.round(budget.remaining() / 1000) + 'k tokens left in the turn\'s budget')
+  return { ok: false, stage: stage, error: 'token budget nearly exhausted before ' + stage + ' (' + Math.round(budget.remaining() / 1000) + 'k left); nothing past this point ran',
+    base_sha: BASE, diff_command: DIFF_CMD, recon: recon, documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null },
+    plan: { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [] },
+    lane_errors: laneErrors, ...(extra || {}) }
+}
+if (!budgetLeft(60000)) return outOfBudget('implement')
 
 function implPrompt(s, landedSiblings) {
   return [
@@ -1345,8 +1528,14 @@ function implPrompt(s, landedSiblings) {
       : '- There is nothing executable to run here, so do NOT claim you ran anything: leave checks_run empty and\n' +
       '  checks_passed false. Compensate by keeping the commit small and self-evident in the diff, since a\n' +
       '  reviewer reading it is the only gate this work will get.'),
-    '- Commit with a clear message.',
-    '- Do NOT push. Do NOT merge or rebase branches. Do NOT amend commits you did not make.',
+    '- Commit with a clear message. Stage ONLY the files you edited, by name (`git add <file>`): never `git add -A`,',
+    '  `git add .` or `git commit -a`. Other implementers are working in this same tree on other files at the same',
+    '  time, and a sweep would commit their half-written work under your name. If `git commit` fails on',
+    '  `index.lock`, wait a moment and retry; do not delete the lock.',
+    '- Do NOT push. Do NOT merge or rebase branches. Do NOT amend commits you did not make. Do NOT stash, reset or',
+    '  check out anything: the tree is shared.',
+    '- If the check fails on a file outside your slice that you did not touch, another implementer may be mid-edit:',
+    '  re-run once after a short wait, and if it still fails say exactly that in notes rather than "fixing" their file.',
     '- If the slice defeats you, commit what is genuinely correct and report it as partial or failed.',
     '',
     'Another model that did not write this code will verify it against the real diff and re-run whatever this',
@@ -1373,12 +1562,19 @@ async function implementGroup(group) {
 }
 
 const built = (await wavesOne(groups, WAVE, implementGroup, 'implement wave')).filter(Boolean).flat()
+// callAgent never throws, so a group can only go missing if the runtime dropped it;
+// name the slices rather than let the count quietly shrink.
+const neverRan = plan.slices.filter((s) => !built.some((b) => b.slice.id === s.id)).map((s) => s.id)
+const notImplemented = built.filter((b) => !b.impl).map((b) => b.slice.id)
+if (neverRan.length) log('WARNING: ' + neverRan.length + ' slice(s) never ran (the runtime dropped their group): ' + neverRan.join(', '))
+if (notImplemented.length) log('WARNING: ' + notImplemented.length + ' slice(s) had no implementer result after the fallback: ' + notImplemented.join(', '))
 
 // ---------------------------------------------------------------------------
 // Phase 3 — Verify. Read-only, so there is no file contention and the grouping
 // is irrelevant here: every slice gets its own verifier reading its own commits.
 // ---------------------------------------------------------------------------
 phase('Verify')
+if (!budgetLeft(40000)) return outOfBudget('verify', { never_ran: neverRan, not_implemented: notImplemented, implementation: built.map((b) => ({ slice: b.slice.id, impl: b.impl })) })
 
 const results = (await wavesOne(
   built,
@@ -1389,7 +1585,7 @@ const results = (await wavesOne(
         'You are the VERIFIER. You did not write this code and you do not trust the report below.',
         '',
         'OVERALL TASK:',
-        TASK,
+        TASK_TEXT,
         '',
         'WHAT WAS SUPPOSED TO HAPPEN:',
         sliceBlock(prev.slice),
@@ -1440,7 +1636,7 @@ function reviewPrompt(roundLabel, extra) {
     'You are not here to be reassuring, and a clean verdict you cannot defend is worse than a false alarm.',
     '',
     'OVERALL TASK — this is the bar the work must clear:',
-    TASK,
+    TASK_TEXT,
     '',
     (PLAN_PATH ? 'THE PLAN DOCUMENT THE WORK MUST MATCH, task by task: ' + PLAN_PATH + (SPEC_PATH ? ' (spec: ' + SPEC_PATH + ')' : '') : ''),
     'THE SLICES THAT WERE EXECUTED:',
@@ -1486,14 +1682,27 @@ function reviewPrompt(roundLabel, extra) {
   ].join('\n')
 }
 
+// Finding ids are namespaced by the review that raised them ("r0:F1", "r1:F1"): every
+// reviewer numbers from F1, and a round-1 handed-off F3 used to be conflated with a
+// brand-new F3 from the re-review. `re_raises` (set by a re-review) refers to these ids.
+function stampReview(rev, n) {
+  if (!rev || !Array.isArray(rev.findings)) return rev
+  return { ...rev, findings: namespaced('r' + n, rev.findings) }
+}
+
 phase('Review')
-let review = await callAgent(reviewPrompt('the first review', ''), {
+if (!budgetLeft(40000)) return outOfBudget('review', { never_ran: neverRan, not_implemented: notImplemented, implementation: results, failed_verification: failedVerify.map((r) => r.slice.id) })
+let review = stampReview(await callAgent(reviewPrompt('the first review', ''), {
   label: 'adversary:r0',
   phase: 'Review',
   model: JUDGE,
   effort: EFFORT,
   schema: REVIEW_SCHEMA,
-})
+}), 0)
+// True when the LAST review lane (first or a re-review) returned nothing after its
+// fallback. Then nothing is known to be closed and the result says so, loudly.
+let reviewMissing = !review
+if (reviewMissing) log('WARNING: the adversarial review returned nothing after the fallback — this work is UNREVIEWED')
 
 // ---------------------------------------------------------------------------
 // Phase 5 — Patch rounds. Stops the moment a review comes back clean.
@@ -1508,7 +1717,7 @@ while (
   Array.isArray(review.findings) &&
   review.findings.length > 0
 ) {
-  if (budget.total && budget.remaining() < 60000) {
+  if (!budgetLeft(60000)) {
     log('stopping before patch round ' + (round + 1) + ': ' + Math.round(budget.remaining() / 1000) + 'k tokens left in budget')
     break
   }
@@ -1602,11 +1811,20 @@ while (
     ).then((v) => ({ ...prev, verify: v }))
   }
 
+  // A patch that does not exist is not verified: a patcher that returned nothing or
+  // reported `failed` gets no Opus verifier sent to `git show undefined`. The finding
+  // is carried to the orchestrator by collectForOrchestrator either way.
   async function patchGroup(group) {
     const verifies = []
     for (const item of group.slices) {
       const p = await patchOne(item.finding)
-      if (p) verifies.push(verifyOne(p))
+      if (!p) continue
+      if (!p.patch || p.patch.status === 'failed') {
+        log('patch ' + item.finding.id + ': ' + (p.patch ? 'patcher reported failed' : 'patcher returned nothing') + ' — no verifier sent')
+        verifies.push(Promise.resolve({ ...p, verify: null }))
+        continue
+      }
+      verifies.push(verifyOne(p))
     }
     return parallel(verifies.map((v) => () => v))
   }
@@ -1620,24 +1838,37 @@ while (
     done.filter((p) => !p.patch || p.patch.status === 'failed').length + ' failed')
 
   phase('Review')
-  review = await callAgent(
+  if (!budgetLeft(40000)) {
+    log('stopping before re-review ' + round + ': ' + Math.round(budget.remaining() / 1000) + 'k tokens left in budget — the patches are UNREVIEWED')
+    review = null
+    reviewMissing = true
+    break
+  }
+  review = stampReview(await callAgent(
     reviewPrompt(
       'review round ' + round + ' of at most ' + MAX_ROUNDS,
       [
         'PATCHES APPLIED SINCE THE LAST REVIEW:',
         JSON.stringify(done.map((p) => ({ finding_id: p.finding.id, claim: p.finding.claim, patch: p.patch, verify: p.verify })), null, 2),
-        (deferred.length ? 'DEFERRED, NOT PATCHED: ' + deferred.map((f) => f.id + ' (' + f.claim + ')').join(' | ') : ''),
+        (deferred.length ? 'DEFERRED, NOT PATCHED (already on the orchestrator\'s list; do not re-raise unless a patch made one worse): ' +
+          deferred.map((f) => f.id + ' (' + f.claim + ')').join(' | ') : ''),
+        (handedOff.length ? 'HANDED TO THE ORCHESTRATOR, NOT PATCHED (below the auto-patch severity; already on their list; do not re-raise unless a patch made one worse): ' +
+          handedOff.map((f) => f.id + ' (' + f.claim + ')').join(' | ') : ''),
         '',
         'Two jobs this round, and the second is the one people forget:',
-        '(a) Is each finding above GENUINELY closed? A patch that moves the symptom is not a fix. Re-raise it if not.',
+        '(a) Is each patched finding above GENUINELY closed? A patch that moves the symptom is not a fix. If not, raise it',
+        '    again as a finding with `re_raises` set to the earlier id (e.g. "r0:F2") so it is not counted twice.',
         '(b) Did the patches themselves introduce anything new? Patch rounds are written under time pressure and',
         '    are a common source of fresh defects. Review their diffs as adversarially as the original work.',
-        'A finding the patcher disputed with sound evidence should NOT be re-raised — say so in summary instead.',
+        'A finding the patcher disputed with sound evidence should NOT be re-raised — say so in summary instead; the',
+        'dispute is handed to the orchestrator with its evidence regardless.',
         '',
       ].join('\n')
     ),
     { label: 'adversary:r' + round, phase: 'Review', model: JUDGE, effort: EFFORT, schema: REVIEW_SCHEMA }
-  )
+  ), round)
+  reviewMissing = !review
+  if (reviewMissing) log('WARNING: re-review ' + round + ' returned nothing after the fallback — the patches are UNREVIEWED')
 }
 
 // ---------------------------------------------------------------------------
@@ -1646,25 +1877,10 @@ while (
 const openFindings = review && Array.isArray(review.findings) && review.clean !== true ? review.findings : []
 const stoppedEarly = round >= MAX_ROUNDS && openFindings.length > 0
 
-// Everything the orchestrator must close by hand, at EVERY severity: what the last
-// review left standing, plus every finding a round handed off (below PATCH_SEVERITY)
-// or deferred (past the per-round cap), unless a later review explicitly re-raised
-// it under the same id (then it is already in openFindings) — a later review that
-// simply did not mention a handed-off minor has not closed it. Sorted critical first.
-const forOrchestrator = []
-const seenIds = new Set()
-for (const f of openFindings) {
-  if (f && f.id && !seenIds.has(f.id)) { seenIds.add(f.id); forOrchestrator.push({ ...f, source: 'final review' }) }
-}
-for (const r of rounds) {
-  for (const f of [...(r.handed_off || []), ...(r.deferred || [])]) {
-    if (f && f.id && !seenIds.has(f.id)) {
-      seenIds.add(f.id)
-      forOrchestrator.push({ ...f, source: (r.handed_off || []).includes(f) ? 'handed off in round ' + r.round : 'deferred in round ' + r.round })
-    }
-  }
-}
-forOrchestrator.sort((a, b) => severityRank(a.severity) - severityRank(b.severity))
+// Everything the orchestrator must close by hand, at EVERY severity — see
+// collectForOrchestrator for what counts. With no final review, every patched
+// finding is carried too, because nothing confirmed it closed.
+const forOrchestrator = collectForOrchestrator(openFindings, rounds, !reviewMissing)
 const bySeverity = { critical: 0, major: 0, minor: 0 }
 for (const f of forOrchestrator) bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1
 if (forOrchestrator.length) {
@@ -1683,9 +1899,17 @@ if (fallbacksUsed.length) {
   log(fallbacksUsed.length + ' lane(s) ran on a FALLBACK model after the primary returned nothing: ' +
     fallbacksUsed.map((f) => f.label + ' -> ' + f.fallback).join(', '))
 }
+if (laneErrors.length) {
+  log(laneErrors.length + ' lane failure(s) recorded: ' + laneErrors.map((e) => e.label + ' (' + e.error.slice(0, 60) + ')').join(', '))
+}
 
 return {
-  ok: true,
+  // ok:false with a reason whenever the verdict cannot be trusted: the adversary never
+  // returned, or slices were dropped before anyone judged them. The rest of the report
+  // is still here — the work exists on the branch — but it is not a clean run.
+  ok: !reviewMissing && neverRan.length === 0,
+  ...(reviewMissing ? { stage: 'review', error: 'the adversarial review returned nothing after its fallback; the work on the branch is UNREVIEWED and every finding of the last round is carried in for_orchestrator', review_missing: true } : { review_missing: false }),
+  ...(neverRan.length ? { stage: 'implement', error: neverRan.length + ' slice(s) never ran: ' + neverRan.join(', ') } : {}),
   task: TASK,
   base_sha: BASE,
   diff_command: DIFF_CMD,
@@ -1721,6 +1945,12 @@ return {
     problems: r.verify ? r.verify.problems : null,
   })),
   failed_verification: failedVerify.map((r) => r.slice.id),
+  // Slices the runtime dropped before an implementer ran, and slices whose implementer
+  // (and its fallback) returned nothing: neither has a commit to verify.
+  never_ran: neverRan,
+  not_implemented: notImplemented,
+  // Every lane that returned nothing or threw, primary or fallback, with the reason.
+  lane_errors: laneErrors,
   patch_rounds: rounds,
   final_review: review,
   open_findings: openFindings,
