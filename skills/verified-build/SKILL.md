@@ -397,7 +397,10 @@ Otherwise the return value is structured. Report these, and in this order:
    treat it as broken either. A patch reported `fixed` is closed on the patcher's word
    plus the re-review's silence: the re-review reads every patch diff and re-raises
    what is not genuinely closed.
-8. **`models.fallbacks.used`** — lanes whose primary model returned nothing and were
+8. **`timing`** — `run_wall_clock_seconds` for the run, `agent_seconds_by_phase` (lanes
+   that ran in parallel are summed, so a phase can exceed the wall clock), and one entry
+   per lane. Report the phase split in one line; it is the evidence for the next cut.
+9. **`models.fallbacks.used`** — lanes whose primary model returned nothing and were
    re-run once on the fallback tier (`label`, `primary`, `fallback` per entry). Say
    which verdicts came from the fallback model: "reviewed by Fable because Opus was
    overloaded" is a different sentence from "reviewed by Opus", and a Fable lane billed

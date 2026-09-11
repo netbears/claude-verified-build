@@ -7,7 +7,7 @@ const H = loadHelpers([
   'normPath', 'expandBraces', 'pathsOverlap', 'declaredFiles', 'groupByFileConflict',
   'severityRank', 'mergePrices', 'priceOf', 'lineCost', 'estimateRun',
   'namespaced', 'parseAnswers', 'collectForOrchestrator', 'looksLikePath',
-  'footprintViolations', 'patchFootprint', 'judgeReview',
+  'footprintViolations', 'patchFootprint', 'judgeReview', 'timingByPhase',
 ], { consts: ['DEFAULT_PRICES', 'RECON_SCHEMA'] })
 
 test('recon must report today as a YYYY-MM-DD date: required, with a pattern the runtime enforces', () => {
@@ -225,4 +225,11 @@ test('judgeReview: clean needs the diff read, no findings, and the check run whe
   assert.equal(j.executed, false)
   assert.equal(j.dirty_paths, ' M a.js')
   assert.ok(H.logs.some((l) => /without running the check/.test(l)))
+})
+
+test('timingByPhase sums agent seconds per phase and keeps the lanes', () => {
+  const t = H.timingByPhase([{ label: 'a', phase: 'Implement', seconds: 5 }, { label: 'b', phase: 'Implement', seconds: 7 }, { label: 'c', phase: null, seconds: 1 }], 20)
+  assert.deepEqual(t.agent_seconds_by_phase, { Implement: 12, other: 1 })
+  assert.equal(t.run_wall_clock_seconds, 20)
+  assert.equal(t.lanes.length, 3)
 })

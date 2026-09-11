@@ -398,6 +398,14 @@ test('a clean, complete run is ok with no reasons against it', async () => {
   assert.deepEqual(out.not_ok, [])
 })
 
+test('the result reports wall clock for the run and agent-seconds per phase, one entry per lane', async () => {
+  const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true })
+  assert.ok(Number.isInteger(out.timing.run_wall_clock_seconds))
+  assert.ok('Implement' in out.timing.agent_seconds_by_phase && 'Review' in out.timing.agent_seconds_by_phase)
+  const timed = out.timing.lanes.map((t) => t.label)
+  assert.deepEqual(timed, labels.filter((l) => !l.startsWith('probe:')), 'every lane through callAgent is timed')
+})
+
 // ---------------------------------------------------------------------------
 // The shared tree: what the prompts must say, and what runs beside what.
 // ---------------------------------------------------------------------------

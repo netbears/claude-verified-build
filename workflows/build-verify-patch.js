@@ -122,6 +122,12 @@ const FALLBACK = input.fallback !== false
 const CODER_FALLBACK = String(input.coderFallback || 'opus')
 const JUDGE_FALLBACK = String(input.judgeFallback || 'fable')
 const fallbacksUsed = []
+// Wall clock per lane, in seconds, primary and fallback attempts summed. The six-run
+// phase table in the skill was reconstructed from transcripts by hand; this makes the
+// next run report it, so the question "which stage is slow" has an answer in the result.
+const laneTimings = []
+const RUN_T0 = Date.now()
+function elapsed(t0) { return Math.round((Date.now() - t0) / 1000) }
 
 function fallbackFor(model) {
   if (model === CODER) return CODER_FALLBACK
@@ -135,6 +141,17 @@ function fallbackFor(model) {
 // level it aborted the run with no report. Every failure now lands in laneErrors and
 // the lane returns null, which every caller already handles.
 async function callAgent(prompt, opts) {
+  const t0 = Date.now()
+  try { return await callAgentInner(prompt, opts) }
+  finally {
+    const o = opts || {}
+    const secs = elapsed(t0)
+    laneTimings.push({ label: o.label || 'agent', phase: o.phase || null, model: o.model || null, seconds: secs })
+    log((o.label || 'agent') + ': ' + secs + 's (run at +' + elapsed(RUN_T0) + 's)')
+  }
+}
+
+async function callAgentInner(prompt, opts) {
   const o = opts || {}
   const label = o.label || 'agent'
   let first = null
@@ -537,6 +554,15 @@ function sliceBlock(s) {
     'files:     ' + (s.files || []).join(', '),
     'done when: ' + s.done_when,
   ].join('\n')
+}
+
+// Seconds per phase, summed over its lanes, plus the run's wall clock so far. Lanes
+// that ran in parallel are summed, not overlapped: the figure is agent time, and
+// the run total is the wall clock.
+function timingByPhase(timings, runSeconds) {
+  const by = {}
+  for (const t of timings || []) { by[t.phase || 'other'] = (by[t.phase || 'other'] || 0) + (t.seconds || 0) }
+  return { run_wall_clock_seconds: runSeconds, agent_seconds_by_phase: by, lanes: timings || [] }
 }
 
 function severityRank(sev) {
@@ -1302,8 +1328,8 @@ if (FROM === 'idea' || FROM === 'spec') {
       '  the exact commands, the commit message.',
       '- Tasks that touch a common file run one after another. Keep such chains at four or fewer; merge',
       '  where a chain would be longer. Prefer tasks that are file-disjoint.',
-      '- A different model re-runs the repo\'s check on every commit and reads the real diff; a third pass',
-      '  attacks the whole. Write the plan so those judges have something exact to hold the work to.',
+      '- A different model then reads the whole diff, re-runs the repo\'s check and attacks the work against',
+      '  this plan, task by task. Write the plan so that judge has something exact to hold the work to.',
       '',
       'OUTPUT:',
       '- Write to `' + PLANS_DIR + '/' + TODAY + '-<slug>.md`' + (SPEC_PATH ? ' (same slug as the spec).' : '.'),
@@ -2017,6 +2043,8 @@ return {
   footprint_violations: violations,
   // Every lane that returned nothing or threw, primary or fallback, with the reason.
   lane_errors: laneErrors,
+  // Where the minutes went: wall clock for the run, agent-seconds per phase, and every lane.
+  timing: timingByPhase(laneTimings, elapsed(RUN_T0)),
   patch_rounds: rounds,
   final_review: review,
   open_findings: openFindings,
