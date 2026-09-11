@@ -199,7 +199,7 @@ test('slices keep the plan order inside a chain and the bridging slice runs last
 
 test('an implementer that throws is a recorded lane error, not a dropped group, and the run still reports', async () => {
   const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true, fallback: false }, { 'impl:s2': new Error('budget exhausted') })
-  assert.equal(out.ok, true)
+  assert.equal(out.ok, false, 'a slice nobody implemented is not a successful run')
   assert.deepEqual(out.not_implemented, ['s2'])
   assert.deepEqual(out.never_ran, [])
   assert.equal(out.lane_errors.length, 1)
@@ -300,4 +300,72 @@ test('the implementer is told to stage by name and never sweep the shared tree',
   const impl = calls.find((c) => c.label === 'impl:s1').prompt
   assert.match(impl, /git add <file>/)
   assert.match(impl, /never `git add -A`/)
+})
+
+// ---------------------------------------------------------------------------
+// The verdict is mechanical. ok:true means the run completed AND every gate
+// passed; anything else names its reasons in `not_ok`.
+// ---------------------------------------------------------------------------
+test('a slice with no implementer result makes the run not ok, and not_ok names it', async () => {
+  const { out } = await run({ ...BASE_ARGS, approveEstimate: true, fallback: false }, { 'impl:s2': new Error('budget exhausted') })
+  assert.equal(out.ok, false)
+  assert.deepEqual(out.not_implemented, ['s2'])
+  assert.ok(out.not_ok.some((r) => /not implemented/.test(r)), out.not_ok.join(' | '))
+})
+
+test('a slice that failed verification makes the run not ok', async () => {
+  const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, {
+    'verify:s1': { verified: false, executed: true, commands_run: 'node --test', output_tail: 'FAIL', checks_available: true, problems: [{ severity: 'major', what: 'x', evidence: 'e' }], summary: 'no' },
+  })
+  assert.equal(out.ok, false)
+  assert.deepEqual(out.failed_verification, ['s1'])
+  assert.ok(out.not_ok.some((r) => /failed verification/.test(r)), out.not_ok.join(' | '))
+})
+
+test('verified:true without executed:true is not a verification when the repo has checks', async () => {
+  const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, {
+    'verify:s1': { verified: true, executed: false, commands_run: '', output_tail: '', checks_available: true, problems: [], summary: 'read it' },
+  })
+  assert.deepEqual(out.failed_verification, ['s1'])
+  assert.equal(out.implementation.find((r) => r.slice === 's1').verified, false)
+  assert.ok(out.implementation.find((r) => r.slice === 's1').problems.some((p) => /not executed/.test(p.what)))
+})
+
+test('a review that says clean:true but lists findings is not clean: the findings are patched and reported', async () => {
+  const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true }, {
+    'adversary:r0': { clean: true, diff_reviewed: true, summary: 'clean?', findings: [
+      { id: 'F1', severity: 'critical', file: 'src/a.js', claim: 'bug', failure_scenario: 'x -> crash' }] },
+  })
+  assert.ok(labels.includes('patch:r0:F1'), 'the critical finding was patched despite clean:true')
+  assert.equal(out.patch_rounds.length, 1)
+})
+
+test('a review that did not read the diff cannot make the run ok', async () => {
+  const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, {
+    'adversary:r1': { clean: true, diff_reviewed: false, findings: [], summary: 'skimmed' },
+  })
+  assert.equal(out.ok, false)
+  assert.equal(out.final_review.clean, false)
+  assert.ok(out.not_ok.some((r) => /diff/.test(r)), out.not_ok.join(' | '))
+})
+
+test('scope the slicer left uncovered makes the run not ok', async () => {
+  const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, { slice: { shared_context: 'ctx', task_summary: 'brief', slices: SLICES, uncovered: ['the docs'] } })
+  assert.equal(out.ok, false)
+  assert.ok(out.not_ok.some((r) => /uncovered/.test(r)), out.not_ok.join(' | '))
+})
+
+test('uncommitted changes in the tree at review time make the run not ok', async () => {
+  const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, {
+    'adversary:r0': { clean: true, diff_reviewed: true, findings: [], summary: 'clean', dirty_paths: ' M src/a.js' },
+  })
+  assert.equal(out.ok, false)
+  assert.equal(out.uncommitted_at_review, ' M src/a.js')
+  assert.ok(out.not_ok.some((r) => /uncommitted/.test(r)), out.not_ok.join(' | '))
+})
+
+test('a clean, complete run is ok with no reasons against it', async () => {
+  const { out } = await run({ ...BASE_ARGS, approveEstimate: true })
+  assert.equal(out.ok, true)
+  assert.deepEqual(out.not_ok, [])
 })

@@ -309,6 +309,7 @@ const VERIFY_SCHEMA = {
     commands_run: { type: 'string', description: 'The exact command(s) you ran, newline-separated. Empty if you ran none.' },
     output_tail: { type: 'string', description: 'The real last ~20 lines of that output. Never reconstructed from memory.' },
     checks_available: { type: 'boolean', description: 'False if this repo genuinely has nothing executable to run — which is a fact about the repo, not a failure by the implementer.' },
+    dirty_paths: { type: 'string', description: 'The output of `git status --porcelain`, trimmed, at the moment you ran the check. Empty if the tree was clean. A check that passed on uncommitted edits proves nothing about the commits.' },
     problems: {
       type: 'array',
       items: {
@@ -334,6 +335,7 @@ const REVIEW_SCHEMA = {
   properties: {
     clean: { type: 'boolean' },
     diff_reviewed: { type: 'boolean', description: 'True only if you actually ran the diff command and read the output.' },
+    dirty_paths: { type: 'string', description: 'The output of `git status --porcelain`, trimmed. Empty if the tree was clean. Anything uncommitted here is work the diff you reviewed does not contain.' },
     findings: {
       type: 'array',
       items: {
@@ -576,6 +578,34 @@ function collectForOrchestrator(openFindings, rounds, hasFinalReview) {
     for (const f of r.deferred || []) add(f, 'deferred in round ' + r.round + ' (past the per-round cap)')
   }
   return out.sort((a, b) => severityRank(a.severity) - severityRank(b.severity))
+}
+
+// A verifier's `verified` is a claim; `executed` is the evidence. Where the repo has a
+// check command, verified:true without executed:true is a read-only review that the
+// prompt already told the verifier to report as verified:false — so the engine makes it
+// so rather than trusting the boolean. The downgrade is recorded as a problem.
+function normalizeVerify(v, hasChecks) {
+  if (!v) return v
+  if (v.verified === true && hasChecks && v.executed !== true) {
+    log('verifier claimed verified:true without running the check — downgraded to verified:false')
+    return { ...v, verified: false, claimed_verified: true,
+      problems: [...(v.problems || []), { severity: 'major', what: 'not executed: the verifier reported verified:true without running the check command', evidence: 'executed:false in the verifier\'s own report' }] }
+  }
+  return v
+}
+
+// `clean`, `diff_reviewed` and `findings` are three independent booleans/arrays in the
+// schema, and a reviewer can return any combination. The engine derives clean from
+// the other two: a review is clean only if the diff was read AND nothing was found.
+// The reviewer's own boolean is kept as `claimed_clean` so a contradiction is visible.
+function judgeReview(rev) {
+  if (!rev) return rev
+  const findings = Array.isArray(rev.findings) ? rev.findings : []
+  const clean = rev.diff_reviewed === true && findings.length === 0
+  if (rev.clean === true && !clean) {
+    log('WARNING: the reviewer said clean:true ' + (findings.length ? 'but listed ' + findings.length + ' finding(s)' : 'without reading the diff') + ' — treated as NOT clean')
+  }
+  return { ...rev, findings, clean, claimed_clean: rev.clean === true, dirty_paths: String(rev.dirty_paths || '').replace(/\s+$/, '') }
 }
 
 
@@ -1605,6 +1635,8 @@ const results = (await wavesOne(
           ? 'Run the check YOURSELF. ' + TEST_LINE + ' Paste the real tail into output_tail and set executed:true.'
           : 'There is nothing executable in this repo. ' + TEST_LINE + ' Set executed:false and checks_available:false,'
           + ' and review the diff as carefully as you would if it were the only evidence — because it is.'),
+        '   Before you run it, run `git status --porcelain` and report it in dirty_paths. If any file of THIS slice',
+        '   is uncommitted, the check proves nothing about the commits: verified:false with a problem saying so.',
         '4. Look specifically for: files touched outside the declared set; tests or checks weakened, skipped or',
         '   deleted to make things pass; TODO stubs standing in for the work; commented-out assertions; except/catch',
         '   blocks that swallow the error the check was supposed to surface; a value hardcoded where it should be derived.',
@@ -1623,7 +1655,7 @@ const results = (await wavesOne(
         '- You report. You do not fix, and you do not commit.',
       ].join('\n'),
       { label: 'verify:' + prev.slice.id, phase: 'Verify', model: JUDGE, effort: EFFORT, schema: VERIFY_SCHEMA }
-    ).then((v) => ({ ...prev, verify: v })),
+    ).then((v) => ({ ...prev, verify: normalizeVerify(v, HAS_CHECKS) })),
   'verify wave'
 )).filter(Boolean)
 
@@ -1654,6 +1686,8 @@ function reviewPrompt(roundLabel, extra) {
     'READ THE ACTUAL DIFF YOURSELF — do not review the reports:',
     '  ' + DIFF_CMD,
     'Set diff_reviewed:true only if you ran that and read the output.',
+    'Then run `git status --porcelain` and report it verbatim in dirty_paths: anything uncommitted is work the',
+    'diff does not contain, and a check that passed on it proves nothing about the branch.',
     '',
     'THE REPO YOU ARE REVIEWING: ' + (recon.ecosystem || 'unknown') +
     (HAS_CHECKS ? '. Its check command is: ' + CHECK_CMD : '. It has NO executable checks.'),
@@ -1690,8 +1724,9 @@ function reviewPrompt(roundLabel, extra) {
 // reviewer numbers from F1, and a round-1 handed-off F3 used to be conflated with a
 // brand-new F3 from the re-review. `re_raises` (set by a re-review) refers to these ids.
 function stampReview(rev, n) {
-  if (!rev || !Array.isArray(rev.findings)) return rev
-  return { ...rev, findings: namespaced('r' + n, rev.findings) }
+  if (!rev) return rev
+  const judged = judgeReview(rev)
+  return { ...judged, findings: namespaced('r' + n, judged.findings) }
 }
 
 phase('Review')
@@ -1703,6 +1738,7 @@ let review = stampReview(await callAgent(reviewPrompt('the first review', ''), {
   effort: EFFORT,
   schema: REVIEW_SCHEMA,
 }), 0)
+const firstReview = review
 // True when the LAST review lane (first or a re-review) returned nothing after its
 // fallback. Then nothing is known to be closed and the result says so, loudly.
 let reviewMissing = !review
@@ -1812,7 +1848,7 @@ while (
           'You do not fix, and you do not commit.',
         ].join('\n'),
       { label: 'verify:' + prev.finding.id, phase: 'Patch', model: JUDGE, effort: EFFORT, schema: VERIFY_SCHEMA }
-    ).then((v) => ({ ...prev, verify: v }))
+    ).then((v) => ({ ...prev, verify: normalizeVerify(v, HAS_CHECKS) }))
   }
 
   // A patch that does not exist is not verified: a patcher that returned nothing or
@@ -1878,8 +1914,11 @@ while (
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
-const openFindings = review && Array.isArray(review.findings) && review.clean !== true ? review.findings : []
+const openFindings = review ? review.findings : []
 const stoppedEarly = round >= MAX_ROUNDS && openFindings.length > 0
+// The first review runs at the barrier after every implementer has finished, so the
+// tree should be clean there; anything it found uncommitted is work outside the diff.
+const uncommittedAtReview = firstReview ? firstReview.dirty_paths : ''
 
 // Everything the orchestrator must close by hand, at EVERY severity — see
 // collectForOrchestrator for what counts. With no final review, every patched
@@ -1907,11 +1946,24 @@ if (laneErrors.length) {
   log(laneErrors.length + ' lane failure(s) recorded: ' + laneErrors.map((e) => e.label + ' (' + e.error.slice(0, 60) + ')').join(', '))
 }
 
+// ok is mechanical: true only when the run completed AND every gate passed. Every
+// reason it did not is listed in not_ok, so a consumer keying off ok alone cannot
+// mistake a half-built, unverified, unreviewed or dirty run for a success. The rest
+// of the report is still here either way — the work exists on the branch.
+const notOk = []
+if (reviewMissing) notOk.push('the adversarial review returned nothing after its fallback: the work is unreviewed')
+if (neverRan.length) notOk.push(neverRan.length + ' slice(s) never ran: ' + neverRan.join(', '))
+if (notImplemented.length) notOk.push(notImplemented.length + ' slice(s) not implemented (no implementer result): ' + notImplemented.join(', '))
+if (failedVerify.length) notOk.push(failedVerify.length + ' slice(s) failed verification: ' + failedVerify.map((r) => r.slice.id).join(', '))
+if (plan.uncovered && plan.uncovered.length) notOk.push('the slicer left scope uncovered: ' + plan.uncovered.join(' | '))
+if (uncommittedAtReview) notOk.push('uncommitted changes in the tree at review time (not in the reviewed diff): ' + uncommittedAtReview.slice(0, 300))
+if (review && review.diff_reviewed !== true) notOk.push('the final review did not read the diff (diff_reviewed:false)')
+if (review && review.clean !== true) notOk.push('the final review is not clean: ' + openFindings.length + ' finding(s) open')
+if (notOk.length) log('NOT OK — ' + notOk.join('; '))
+
 return {
-  // ok:false with a reason whenever the verdict cannot be trusted: the adversary never
-  // returned, or slices were dropped before anyone judged them. The rest of the report
-  // is still here — the work exists on the branch — but it is not a clean run.
-  ok: !reviewMissing && neverRan.length === 0,
+  ok: notOk.length === 0,
+  not_ok: notOk,
   ...(reviewMissing ? { stage: 'review', error: 'the adversarial review returned nothing after its fallback; the work on the branch is UNREVIEWED and every finding of the last round is carried in for_orchestrator', review_missing: true } : { review_missing: false }),
   ...(neverRan.length ? { stage: 'implement', error: neverRan.length + ' slice(s) never ran: ' + neverRan.join(', ') } : {}),
   task: TASK,
@@ -1953,6 +2005,7 @@ return {
   // (and its fallback) returned nothing: neither has a commit to verify.
   never_ran: neverRan,
   not_implemented: notImplemented,
+  uncommitted_at_review: uncommittedAtReview,
   // Every lane that returned nothing or threw, primary or fallback, with the reason.
   lane_errors: laneErrors,
   patch_rounds: rounds,
