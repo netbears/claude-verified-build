@@ -1,6 +1,6 @@
 export const meta = {
   name: 'build-verify-patch',
-  description: 'From an idea: Opus writes the spec, adversarially reviews and folds it in, writes the plan, reviews and folds that in; then Sonnet implements in waves of 15, Opus verifies every commit, Opus adversarially reviews the combined diff, and one patch round closes critical/major findings',
+  description: 'From an idea: Opus writes the spec, adversarially reviews and folds it in, writes the plan, reviews and folds that in; then Sonnet implements in waves of 15, Opus adversarially reviews the combined diff and re-runs the repo\'s check, and one patch round closes critical/major findings',
   whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix.',
   phases: [
     { title: 'Probe', detail: 'one trivial call per model: are sonnet and opus enabled for this account?' },
@@ -11,9 +11,8 @@ export const meta = {
     { title: 'Plan review', detail: 'opus adversarially reviews the plan against the tree; opus folds the findings in', model: 'opus' },
     { title: 'Slice', detail: 'opus maps the plan\'s tasks onto file-disjoint slices', model: 'opus' },
     { title: 'Implement', detail: 'sonnet writes and commits each slice', model: 'sonnet' },
-    { title: 'Verify', detail: 'opus re-runs the repo\'s checks and reads the real diff', model: 'opus' },
-    { title: 'Review', detail: 'opus adversarially reviews the combined diff', model: 'opus' },
-    { title: 'Patch', detail: 'sonnet fixes each critical/major finding, opus re-verifies (1 round by default)', model: 'sonnet' },
+    { title: 'Review', detail: 'opus adversarially reviews the combined diff and re-runs the repo\'s check', model: 'opus' },
+    { title: 'Patch', detail: 'sonnet fixes each critical/major finding; opus re-reviews the whole diff (1 round by default)', model: 'sonnet' },
   ],
 }
 
@@ -112,7 +111,7 @@ const ALLOW_TRUNK = input.allowTrunk === true
 
 // Fallback tiers. agent() returns null when a subagent dies on a terminal API
 // error after the runtime's own retries (a 529 Overloaded storm, typically), and
-// a verifier that returned null is a slice nobody checked. One retry on the other
+// an adversary that returned null is a diff nobody reviewed. One retry on the other
 // tier turns a one-model outage into a slower run instead of an unverified one.
 // 2026-09-03: Opus was overloaded for ~90 minutes, every judge lane returned null,
 // and the run reported ok:true with zero verification. This is the fix.
@@ -292,49 +291,24 @@ const IMPL_SCHEMA = {
           files_touched: { type: 'array', items: { type: 'string' } },
           checks_run: { type: 'string', description: 'The exact command(s) you ran, or empty if you ran none.' },
           checks_passed: { type: 'boolean' },
-          notes: { type: 'string', description: 'Anything the verifier must know, including files you touched outside your declared set and why.' },
+          notes: { type: 'string', description: 'Anything the reviewer must know, including files you touched outside your declared set and why.' },
         },
       },
     },
-  },
-}
-
-const VERIFY_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['verified', 'executed', 'summary', 'problems'],
-  properties: {
-    verified: { type: 'boolean' },
-    executed: { type: 'boolean', description: 'True only if you ran the repo\'s check command yourself and saw it complete. Reading code is not executing.' },
-    commands_run: { type: 'string', description: 'The exact command(s) you ran, newline-separated. Empty if you ran none.' },
-    output_tail: { type: 'string', description: 'The real last ~20 lines of that output. Never reconstructed from memory.' },
-    checks_available: { type: 'boolean', description: 'False if this repo genuinely has nothing executable to run — which is a fact about the repo, not a failure by the implementer.' },
-    dirty_paths: { type: 'string', description: 'The output of `git status --porcelain`, verbatim, at the moment you ran the check. Empty if the tree was clean. A check that passed on uncommitted edits proves nothing about the commits.' },
-    problems: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['severity', 'what', 'evidence'],
-        properties: {
-          severity: { type: 'string', enum: ['critical', 'major', 'minor'] },
-          file: { type: 'string' },
-          what: { type: 'string' },
-          evidence: { type: 'string', description: 'The diff hunk or command output that shows it.' },
-        },
-      },
-    },
-    summary: { type: 'string' },
   },
 }
 
 const REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['clean', 'diff_reviewed', 'findings', 'summary'],
+  required: ['clean', 'diff_reviewed', 'executed', 'findings', 'summary'],
   properties: {
     clean: { type: 'boolean' },
     diff_reviewed: { type: 'boolean', description: 'True only if you actually ran the diff command and read the output.' },
+    executed: { type: 'boolean', description: 'True only if you ran the repo\'s check command yourself and saw it complete. Reading code is not executing.' },
+    commands_run: { type: 'string', description: 'The exact command(s) you ran, newline-separated. Empty if you ran none.' },
+    output_tail: { type: 'string', description: 'The real last ~20 lines of the check\'s output. Never reconstructed from memory.' },
+    checks_available: { type: 'boolean', description: 'False if this repo genuinely has nothing executable to run — a fact about the repo, not a failure by the implementers.' },
     dirty_paths: { type: 'string', description: 'The output of `git status --porcelain`, verbatim. Empty if the tree was clean. Anything uncommitted here is work the diff you reviewed does not contain.' },
     findings: {
       type: 'array',
@@ -385,8 +359,6 @@ const PATCH_SCHEMA = {
 // ---------------------------------------------------------------------------
 
 // Run items through ONE stage in waves of `size`, at most `size` agents live.
-// Used where the two stages cannot be pipelined per item: implement is
-// serialised within a group, while verify is free to run flat out.
 async function wavesOne(items, size, fn, what) {
   const out = []
   for (let i = 0; i < items.length; i += size) {
@@ -603,13 +575,12 @@ function parseAnswers(raw) {
 // first: what the final review left standing; every finding a round handed off (below
 // PATCH_SEVERITY) or deferred (past the per-round cap); and every finding a round tried
 // to patch that did not come back closed — the patcher returned nothing, failed, or
-// disputed it, or the patch verifier would not sign it off. A later review that simply
-// did not mention one of THOSE has not closed it; only a final-review finding whose
-// `re_raises` names it supersedes it (then the newer entry stands and the old one is
-// dropped). A patch reported fixed AND signed off by its verifier is closed on those
-// two agents' word — the re-review is told to re-raise it if it disagrees, and its
-// silence is taken as agreement; that is a deliberate trade, not an oversight. With
-// no final review at all, nothing is treated as closed.
+// disputed it. A later review that simply did not mention one of THOSE has not closed
+// it; only a final-review finding whose `re_raises` names it supersedes it (then the
+// newer entry stands and the old one is dropped). A patch reported fixed is closed on
+// the patcher's word plus the re-review's silence — the re-review reads every patch
+// diff and is told to re-raise what is not genuinely closed; that is a deliberate
+// trade, not an oversight. With no final review at all, nothing is treated as closed.
 function collectForOrchestrator(openFindings, rounds, hasFinalReview) {
   const out = []
   const seen = new Set()
@@ -628,12 +599,10 @@ function collectForOrchestrator(openFindings, rounds, hasFinalReview) {
       const f = p && p.finding
       if (!f) continue
       const status = p.patch ? p.patch.status : null
-      const verified = p.verify ? p.verify.verified === true : false
       if (!hasFinalReview) add(f, 'patched in round ' + r.round + ', but there was no final review to confirm it closed')
       else if (!p.patch) add(f, 'no patch: the patcher returned nothing in round ' + r.round)
       else if (status === 'disputed') add(f, 'disputed by the patcher in round ' + r.round + ' — judge the evidence: ' + String(p.patch.notes || '').slice(0, 300))
       else if (status !== 'fixed') add(f, 'patch ' + status + ' in round ' + r.round)
-      else if (!verified) add(f, 'patched in round ' + r.round + ' but the patch verifier did not sign it off')
     }
     for (const f of r.handed_off || []) add(f, 'handed off in round ' + r.round + ' (below the auto-patch severity)')
     for (const f of r.deferred || []) add(f, 'deferred in round ' + r.round + ' (past the per-round cap)')
@@ -641,32 +610,22 @@ function collectForOrchestrator(openFindings, rounds, hasFinalReview) {
   return out.sort((a, b) => severityRank(a.severity) - severityRank(b.severity))
 }
 
-// A verifier's `verified` is a claim; `executed` is the evidence. Where the repo has a
-// check command, verified:true without executed:true is a read-only review that the
-// prompt already told the verifier to report as verified:false — so the engine makes it
-// so rather than trusting the boolean. The downgrade is recorded as a problem.
-function normalizeVerify(v, hasChecks) {
-  if (!v) return v
-  if (v.verified === true && hasChecks && v.executed !== true) {
-    log('verifier claimed verified:true without running the check — downgraded to verified:false')
-    return { ...v, verified: false, claimed_verified: true,
-      problems: [...(v.problems || []), { severity: 'major', what: 'not executed: the verifier reported verified:true without running the check command', evidence: 'executed:false in the verifier\'s own report' }] }
-  }
-  return v
-}
-
-// `clean`, `diff_reviewed` and `findings` are three independent booleans/arrays in the
+// `clean`, `diff_reviewed`, `executed` and `findings` are independent fields in the
 // schema, and a reviewer can return any combination. The engine derives clean from
-// the other two: a review is clean only if the diff was read AND nothing was found.
-// The reviewer's own boolean is kept as `claimed_clean` so a contradiction is visible.
-function judgeReview(rev) {
+// the others: a review is clean only if the diff was read, nothing was found AND —
+// where the repo has a check command — the reviewer ran it. The adversary is the only
+// lane that executes anything after the implementers' own self-reported runs, so a
+// read-only review cannot be clean there. The reviewer's own boolean is kept as
+// `claimed_clean` so a contradiction is visible.
+function judgeReview(rev, hasChecks) {
   if (!rev) return rev
   const findings = Array.isArray(rev.findings) ? rev.findings : []
-  const clean = rev.diff_reviewed === true && findings.length === 0
+  const executed = rev.executed === true
+  const clean = rev.diff_reviewed === true && findings.length === 0 && (!hasChecks || executed)
   if (rev.clean === true && !clean) {
-    log('WARNING: the reviewer said clean:true ' + (findings.length ? 'but listed ' + findings.length + ' finding(s)' : 'without reading the diff') + ' — treated as NOT clean')
+    log('WARNING: the reviewer said clean:true ' + (findings.length ? 'but listed ' + findings.length + ' finding(s)' : rev.diff_reviewed !== true ? 'without reading the diff' : 'without running the check') + ' — treated as NOT clean')
   }
-  return { ...rev, findings, clean, claimed_clean: rev.clean === true, dirty_paths: String(rev.dirty_paths || '').replace(/\s+$/, '') }
+  return { ...rev, findings, clean, executed, claimed_clean: rev.clean === true, dirty_paths: String(rev.dirty_paths || '').replace(/\s+$/, '') }
 }
 
 
@@ -678,7 +637,7 @@ function judgeReview(rev) {
 // install without the plugin behaves identically.
 // ---------------------------------------------------------------------------
 const DOCTRINE_BRAINSTORM = "DOCTRINE FOR THIS STAGE (from the superpowers `brainstorming` skill, adapted for a run with no human to ask):\n\nHelp turn an idea into a fully formed design and spec. Classify the request first and say the\nclassification in the spec: a SPIKE (a feasibility question whose output is an answer, not code to\nkeep), a BOUNDED change (a well-scoped change to a flow that already exists in this repo \u2014 bounded\nmeasures the repo, not your familiarity with the kind of app), or ARCHITECTURAL (a new subsystem, a\nchange that restructures how components fit or alters interfaces others depend on). When in doubt,\ntake the heavier path; hidden complexity discovered mid-way upgrades the path, never downgrades it.\n\"Too simple to need a design\" is the thought that wastes the most work: simple means a short design,\nnot no design.\n\nUnderstanding the idea:\n- Check the current project state first: files, docs, recent commits, the conventions it states.\n- Assess scope before detail. If the request describes several independent subsystems, decompose:\n  name the independent pieces, how they relate, what order they should be built in, and write THIS\n  spec for the first sub-project only; list the rest under \"Out of scope, next specs\".\n- Focus on purpose, constraints, success criteria.\n- There is NO human partner in this run. Every question you would have asked, you must answer\n  yourself: pick the answer a careful colleague would pick, and record every such choice in a\n  section titled \"Decisions taken without the owner\", one row each \u2014 the question, the decision,\n  why \u2014 so the owner can overturn any of them by reading that one section. Never leave a TBD.\n\nExploring approaches:\n- Propose two or three approaches with trade-offs; lead with your recommendation and why.\n- YAGNI ruthlessly: remove unnecessary features from every approach and from the design.\n\nPresenting the design (in the spec):\n- Cover architecture, components, data flow, error handling, testing. Scale each section to its\n  complexity: a few sentences if straightforward, a few hundred words if nuanced.\n- Design for isolation and clarity: units with one purpose, well-defined interfaces, understandable\n  and testable independently. For each unit: what does it do, how do you use it, what does it depend on.\n- In an existing codebase, follow its patterns. Include targeted improvements only where an existing\n  problem affects THIS work; propose no unrelated refactoring.\n\nSpec self-review before you finish (fix inline, no re-review needed):\n1. Placeholder scan: any TBD, TODO, incomplete section or vague requirement \u2014 fix it.\n2. Internal consistency: do sections contradict each other; does the architecture match the features.\n3. Scope check: focused enough for one implementation plan, or does it need decomposition.\n4. Ambiguity check: could a requirement be read two ways \u2014 pick one and make it explicit.\n"
-const DOCTRINE_WRITING_PLANS = "DOCTRINE FOR THIS STAGE (from the superpowers `writing-plans` skill):\n\nWrite a comprehensive implementation plan assuming the engineer has zero context for this codebase\nand questionable taste. Document everything they need: which files to touch for each task, the code,\nthe tests, the docs they might need to check, how to test it. Bite-sized tasks. DRY. YAGNI. TDD.\nFrequent commits. Assume a skilled developer who knows almost nothing about this toolset or problem\ndomain and does not know good test design well.\n\nScope check: if the spec covers several independent subsystems, the plan covers the first and says so.\n\nFile structure first: before defining tasks, map which files are created or modified and what each is\nresponsible for \u2014 this is where decomposition is locked in. Units with clear boundaries and interfaces;\nsmaller focused files over large ones; files that change together live together; in an existing\ncodebase follow its patterns.\n\nTask right-sizing: a task is the smallest unit that carries its own test cycle and is worth a fresh\nreviewer's gate. Fold setup, configuration, scaffolding and documentation into the task whose\ndeliverable needs them; split only where a reviewer could reject one task while approving its\nneighbour. Each task ends with an independently testable deliverable. Each STEP is one action of two\nto five minutes: write the failing test; run it and watch it fail; write the minimal implementation;\nrun it and watch it pass; commit.\n\nThe plan MUST start with this header:\n\n# [Feature Name] Implementation Plan\n\n> **For agentic workers:** this plan is executed by the verified-build engine, one task per slice,\n> each slice implemented by a fresh agent and verified by a different model. Steps use `- [ ]` syntax.\n\n**Goal:** [one sentence]\n**Architecture:** [two or three sentences]\n**Tech Stack:** [key technologies]\n**Spec:** [path \u2014 the plan argues from the spec, so the spec travels with it]\n\n## Global Constraints\n[The spec's project-wide requirements, one line each, exact values copied verbatim. Every task's\nrequirements implicitly include this section.]\n\nThen a \"## File map\" (created / modified / deleted, one line per file with its responsibility) and a\n\"## File-overlap table\" (for every file two or more tasks touch: the tasks, in order \u2014 the engine\nserialises those tasks, so keep chains short and prefer merging a chain longer than four into fewer,\nlarger tasks).\n\nEach task has this structure:\n\n### Task N: [Component Name]\n**Files:** Create / Modify (`exact/path.py:123-145`, measured with grep -n or sed -n on the CURRENT\ntree, never estimated) / Test.\n**Interfaces:** Consumes (what this task uses from earlier tasks \u2014 exact signatures) / Produces (what\nlater tasks rely on \u2014 exact names, parameter and return types; an implementer sees only its own task).\n- [ ] **Step 1: Write the failing test** \u2014 the real test code, in a fenced block.\n- [ ] **Step 2: Run it to verify it fails** \u2014 the exact command and the expected failure.\n- [ ] **Step 3: Write the minimal implementation** \u2014 the real code, in a fenced block.\n- [ ] **Step 4: Run it to verify it passes** \u2014 the exact command.\n- [ ] **Step 5: Run the repo's own check** and **commit** \u2014 the exact commit message in the repo's convention.\n\nNo placeholders. These are plan failures, never write them: \"TBD\", \"TODO\", \"implement later\", \"add\nappropriate error handling\", \"add validation\", \"handle edge cases\", \"write tests for the above\" without\nthe test code, \"similar to Task N\" (repeat the code), steps that describe without showing (code blocks\nare required for code steps), references to names not defined in any task.\n\nSelf-review after writing (fix inline, then stop):\n1. Spec coverage: every requirement in the spec points to a task that implements it; add tasks for gaps.\n2. Placeholder scan: search the plan for every pattern above.\n3. Type consistency: names, signatures and property names used in later tasks match what earlier\n   tasks defined.\n"
+const DOCTRINE_WRITING_PLANS = "DOCTRINE FOR THIS STAGE (from the superpowers `writing-plans` skill):\n\nWrite a comprehensive implementation plan assuming the engineer has zero context for this codebase\nand questionable taste. Document everything they need: which files to touch for each task, the code,\nthe tests, the docs they might need to check, how to test it. Bite-sized tasks. DRY. YAGNI. TDD.\nFrequent commits. Assume a skilled developer who knows almost nothing about this toolset or problem\ndomain and does not know good test design well.\n\nScope check: if the spec covers several independent subsystems, the plan covers the first and says so.\n\nFile structure first: before defining tasks, map which files are created or modified and what each is\nresponsible for \u2014 this is where decomposition is locked in. Units with clear boundaries and interfaces;\nsmaller focused files over large ones; files that change together live together; in an existing\ncodebase follow its patterns.\n\nTask right-sizing: a task is the smallest unit that carries its own test cycle and is worth a fresh\nreviewer's gate. Fold setup, configuration, scaffolding and documentation into the task whose\ndeliverable needs them; split only where a reviewer could reject one task while approving its\nneighbour. Each task ends with an independently testable deliverable. Each STEP is one action of two\nto five minutes: write the failing test; run it and watch it fail; write the minimal implementation;\nrun it and watch it pass; commit.\n\nThe plan MUST start with this header:\n\n# [Feature Name] Implementation Plan\n\n> **For agentic workers:** this plan is executed by the verified-build engine, one task per slice,\n> each slice implemented by a fresh agent and the whole diff reviewed by a different model. Steps use `- [ ]` syntax.\n\n**Goal:** [one sentence]\n**Architecture:** [two or three sentences]\n**Tech Stack:** [key technologies]\n**Spec:** [path \u2014 the plan argues from the spec, so the spec travels with it]\n\n## Global Constraints\n[The spec's project-wide requirements, one line each, exact values copied verbatim. Every task's\nrequirements implicitly include this section.]\n\nThen a \"## File map\" (created / modified / deleted, one line per file with its responsibility) and a\n\"## File-overlap table\" (for every file two or more tasks touch: the tasks, in order \u2014 the engine\nserialises those tasks, so keep chains short and prefer merging a chain longer than four into fewer,\nlarger tasks).\n\nEach task has this structure:\n\n### Task N: [Component Name]\n**Files:** Create / Modify (`exact/path.py:123-145`, measured with grep -n or sed -n on the CURRENT\ntree, never estimated) / Test.\n**Interfaces:** Consumes (what this task uses from earlier tasks \u2014 exact signatures) / Produces (what\nlater tasks rely on \u2014 exact names, parameter and return types; an implementer sees only its own task).\n- [ ] **Step 1: Write the failing test** \u2014 the real test code, in a fenced block.\n- [ ] **Step 2: Run it to verify it fails** \u2014 the exact command and the expected failure.\n- [ ] **Step 3: Write the minimal implementation** \u2014 the real code, in a fenced block.\n- [ ] **Step 4: Run it to verify it passes** \u2014 the exact command.\n- [ ] **Step 5: Run the repo's own check** and **commit** \u2014 the exact commit message in the repo's convention.\n\nNo placeholders. These are plan failures, never write them: \"TBD\", \"TODO\", \"implement later\", \"add\nappropriate error handling\", \"add validation\", \"handle edge cases\", \"write tests for the above\" without\nthe test code, \"similar to Task N\" (repeat the code), steps that describe without showing (code blocks\nare required for code steps), references to names not defined in any task.\n\nSelf-review after writing (fix inline, then stop):\n1. Spec coverage: every requirement in the spec points to a task that implements it; add tasks for gaps.\n2. Placeholder scan: search the plan for every pattern above.\n3. Type consistency: names, signatures and property names used in later tasks match what earlier\n   tasks defined.\n"
 const DOCTRINE_TDD = "DOCTRINE (from the superpowers `test-driven-development` and `verification-before-completion` skills):\n\nThe iron law: NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST. Write one minimal test showing what\nshould happen; run it and WATCH IT FAIL, for the expected reason (feature missing, not a typo \u2014 a test\nthat passes immediately is testing existing behaviour, fix the test); write the simplest code that\npasses; run it and watch it pass with the other tests still green and the output pristine; refactor\nonly after green, adding no behaviour. Wrote code before the test? Delete it and start from the test.\nGood tests: one behaviour each, a name that describes the behaviour, real code rather than mocks\nunless a mock is unavoidable, asserting on behaviour rather than on the mock. Name, before writing a\ntest, the production change that would make it fail. Keep test-only code in test utilities, never in\nproduction classes. Where the repo's only checks are lint/validate/build, those are the red and green.\n\nEvidence before claims, always: NO COMPLETION CLAIM WITHOUT FRESH VERIFICATION EVIDENCE. Before you\nreport any status: identify the command that proves it, run the FULL command fresh, read the whole\noutput and the exit code, and only then make the claim \u2014 with the evidence. \"Should pass\", \"looks\ncorrect\", \"I'm confident\", a previous run, a partial run: none of these is evidence. A regression test\nis proven by red-green: it must fail on the old code and pass on the new. Requirements are met when you\nre-read the task, make a checklist, and verify each line, not when the tests pass.\n"
 const DOCTRINE_DEBUG = "DOCTRINE (from the superpowers `systematic-debugging` skill, plus TDD and verification):\n\nNO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST. Phase 1, root cause: read the error and the finding's\nfailure_scenario completely; reproduce it (a failing test, or a one-off script if the repo has no test\nframework); check what changed recently (git log, git diff); in a multi-component path add evidence at\neach boundary and see WHERE it breaks; trace a bad value back to where it originates and fix at the\nsource, not the symptom. Phase 2, pattern: find working examples of the same shape in this codebase,\nread the reference completely, list every difference. Phase 3, hypothesis: state ONE specific hypothesis,\nmake the smallest change that tests it, one variable at a time; if it did not work form a new\nhypothesis rather than stacking fixes. Phase 4, implement: a failing test that reproduces the finding\nFIRST, then one fix at the root cause, no \"while I'm here\" improvements, no bundled refactoring; then\nverify \u2014 the new test passes, no other test broke, the scenario is actually resolved. If three fixes\nhave failed, stop: the pattern is architectural, report it as disputed-with-evidence rather than\nattempting a fourth. Under time pressure the process is faster than guessing, not slower.\n\nEvidence before claims, always: identify the command that proves the fix, run it in full, read the\noutput, and only then claim it. A regression test is proven by red-green: revert the fix and watch it\nfail, restore it and watch it pass.\n"
 const DOCTRINE_REVIEW_CALIBRATION = "CALIBRATION (from the superpowers code-reviewer template): categorise by ACTUAL severity \u2014 not\neverything is critical. Be specific (file:line, not vague), explain WHY each issue matters and how to\nfix it if not obvious, and give a clear verdict. Never say \"looks good\" without checking, never mark a\nnitpick critical, never report on code you did not read, never be vague (\"improve error handling\"). If a\ndeviation from the plan looks intentional, say so as a deviation rather than a defect; if the plan\nitself is wrong, say that. Your review is read-only on this checkout: never mutate the working tree,\nthe index, HEAD or branch state; if you need another revision, use a separate `git worktree` in a\ntemporary directory. Do the whole review yourself: never spawn a subagent to review part of it.\n"
@@ -824,10 +783,8 @@ const PROFILE = {
   recon: { model: CODER, cache: 5.5, write: 0.2, out: 0.017, measured: true },
   slice: { model: JUDGE, cache: 1.0, write: 0.2, out: 0.015, measured: true },
   implement: { model: CODER, cache: 13.0, write: 0.17, out: 0.025, measured: true },   // per slice
-  verify: { model: JUDGE, cache: 3.9, write: 0.19, out: 0.004, measured: true },       // per slice
-  review: { model: JUDGE, cache: 17.0, write: 0.45, out: 0.011, measured: true },      // per adversarial pass
+  review: { model: JUDGE, cache: 17.0, write: 0.45, out: 0.011, measured: true },      // per adversarial pass (now also runs the check)
   patch: { model: CODER, cache: 12.0, write: 0.08, out: 0.030, measured: true },       // per patched finding
-  patch_verify: { model: JUDGE, cache: 5.5, write: 0.05, out: 0.005, measured: true }, // per patched finding
   spec: { model: JUDGE, cache: 10.0, write: 0.3, out: 0.030, measured: false },
   doc_review: { model: JUDGE, cache: 15.0, write: 0.3, out: 0.015, measured: false },   // spec reviewer
   doc_fold: { model: JUDGE, cache: 10.0, write: 0.3, out: 0.020, measured: false },
@@ -993,7 +950,7 @@ if (recon.is_trunk === true && !ALLOW_TRUNK) {
 const BASE = String(recon.head_sha).trim()
 const CHECK_CMD = TEST_CMD || String(recon.primary_check_cmd || '').trim()
 // An explicit testCmd always wins, including over Recon's has_executable_checks:false —
-// the caller said it runs, and the verifiers will find out if it does not.
+// the caller said it runs, and the adversary will find out if it does not.
 const HAS_CHECKS = TEST_CMD ? true : Boolean(CHECK_CMD) && recon.has_executable_checks !== false
 
 const TEST_LINE = CHECK_CMD
@@ -1005,7 +962,7 @@ const TEST_LINE = CHECK_CMD
 log('repo: ' + (recon.ecosystem || 'unknown') + ' on ' + (recon.branch || '?') +
   ' @ ' + BASE.slice(0, 8) + (HAS_CHECKS ? ' | check: ' + CHECK_CMD : ' | NO EXECUTABLE CHECKS'))
 if (!HAS_CHECKS) {
-  log('WARNING: nothing executable to run. Verification degrades to reading the diff; ' +
+  log('WARNING: nothing executable to run. Review degrades to reading the diff; ' +
     'treat a clean verdict as weaker evidence than usual.')
 }
 if (Array.isArray(recon.verify_commands) && recon.verify_commands.length > 1) {
@@ -1495,14 +1452,14 @@ const plan = await callAgent(
     '   only reshaping allowed is merging adjacent tasks of a serial chain longer than four.',
     '',
     'The one rule that matters: SLICES MUST BE FILE-DISJOINT. Two slices that touch the same file are run one',
-    'after the other instead of at the same time. They each keep their own agent and their own verifier, so the',
+    'after the other instead of at the same time. They each keep their own fresh agent, so the',
     'only thing overlap costs is wall-clock. Declare `files` completely and accurately — under-declaring causes',
     'two agents to edit one file at once, which is the failure mode this whole structure exists to prevent.',
     'Over-declaring costs you time; under-declaring costs you the work.',
     '',
     'Slices that share a file run one after another. If overlap would force MORE THAN FOUR slices into one serial',
-    'chain, MERGE adjacent members of that chain into fewer, larger slices (a merged slice still gets one agent',
-    'and one verifier). Every serialised slice pays a fixed cost — a cold agent reading the repo and its spec — so',
+    'chain, MERGE adjacent members of that chain into fewer, larger slices (a merged slice still gets one fresh',
+    'agent). Every serialised slice pays a fixed cost — a cold agent reading the repo and its spec — so',
     'twelve one-hour-apart micro-slices are slower and dearer than five, and no safer.',
     '',
     'Each slice prompt must be SELF-CONTAINED: its implementer sees only task_summary, shared_context and that',
@@ -1540,7 +1497,7 @@ if (!plan || !plan.slices || !plan.slices.length) {
 const SHARED = String(plan.shared_context || '')
 // What implementers and patchers see instead of the full task: every agent that carried
 // the whole brief re-read it on every turn (plan C: 53 agents, a 4,200-line plan each).
-// Verifiers and the adversary keep the full TASK — it is the bar, and they are the judges.
+// The adversary keeps the full TASK — it is the bar, and the adversary is the judge.
 const TASK_BRIEF = String(plan.task_summary || '').trim() || TASK
 // Two-dot: literally "everything added between BASE and HEAD". Three-dot would
 // route through merge-base, which is identical while history stays linear and
@@ -1557,8 +1514,8 @@ log(plan.slices.length + ' slice(s) -> ' + groups.length + ' conflict-free group
   biggestGroup + '), up to ' + WAVE + ' group(s) at a time')
 if (groups.length === 1 && plan.slices.length > 2) {
   log('WARNING: all ' + plan.slices.length + ' slices merged into ONE group — their declared files overlap ' +
-    'transitively, so nothing can run concurrently. Each slice still gets its own agent and its own ' +
-    'verifier; this run will be slow, not large.')
+    'transitively, so nothing can run concurrently. Each slice still gets its own agent; this run ' +
+    'will be slow, not large.')
 }
 
 // ---------------------------------------------------------------------------
@@ -1583,10 +1540,8 @@ const nSlices = plan.slices.length
 const patchedPerRound = Math.min(MAX_PATCH_PER_ROUND, Math.max(2, Math.round(nSlices * (PATCH_SEVERITY === 'minor' ? 1.0 : PATCH_SEVERITY === 'critical' ? 0.25 : 0.6))))
 const aheadCounts = {
   implement: nSlices,
-  verify: nSlices,
   review: 1 + MAX_ROUNDS,
   patch: MAX_ROUNDS * patchedPerRound,
-  patch_verify: MAX_ROUNDS * patchedPerRound,
 }
 const est = estimateRun(PROFILE, PRICES, spentCounts, aheadCounts)
 const estimate = {
@@ -1689,9 +1644,9 @@ function implPrompt(s, landedSiblings) {
     '  re-run once after a short wait, and if it still fails say exactly that in notes rather than "fixing" their file.',
     '- If the slice defeats you, commit what is genuinely correct and report it as partial or failed.',
     '',
-    'Another model that did not write this code will verify it against the real diff and re-run whatever this',
-    'repo can run. Claiming a check passed when you did not run it will be caught, so report exactly what you',
-    'ran and exactly what happened.',
+    'Another model that did not write this code will review the real diff and re-run whatever this repo can',
+    'run. Claiming a check passed when you did not run it will be caught, so report exactly what you ran and',
+    'exactly what happened.',
   ].join('\n')
 }
 
@@ -1723,68 +1678,18 @@ const violations = footprintViolations(built, groups)
 if (violations.length) log('WARNING: ' + violations.length + ' undeclared file(s) touched inside another group\'s footprint: ' +
   violations.map((v) => v.slice + ' -> ' + v.file + ' (declared by ' + v.collides_with.join(', ') + ')').join('; '))
 
-// ---------------------------------------------------------------------------
-// Phase 3 — Verify. Read-only, so there is no file contention and the grouping
-// is irrelevant here: every slice gets its own verifier reading its own commits.
-// ---------------------------------------------------------------------------
-phase('Verify')
-if (!budgetLeft(40000)) return outOfBudget('verify', { never_ran: neverRan, not_implemented: notImplemented, implementation: built.map((b) => ({ slice: b.slice.id, impl: b.impl })) })
-
-const results = (await wavesOne(
-  built,
-  WAVE,
-  (prev) =>
-    callAgent(
-      [
-        'You are the VERIFIER. You did not write this code and you do not trust the report below.',
-        '',
-        'OVERALL TASK:',
-        TASK_TEXT,
-        '',
-        'WHAT WAS SUPPOSED TO HAPPEN:',
-        sliceBlock(prev.slice),
-        '',
-        'WHAT THE IMPLEMENTER CLAIMS:',
-        JSON.stringify(prev.impl, null, 2),
-        '',
-        'DO THIS, IN ORDER:',
-        '1. For every commit sha claimed, run `git show --stat <sha>` and `git show <sha>`. A sha that does not',
-        '   exist, or a commit whose diff does not match its message, is verified:false on its own.',
-        '2. Read the diff. Does it do what the slice said, or something merely adjacent to it?',
-        '3. ' + (HAS_CHECKS
-          ? 'Run the check YOURSELF. ' + TEST_LINE + ' Paste the real tail into output_tail and set executed:true.'
-          : 'There is nothing executable in this repo. ' + TEST_LINE + ' Set executed:false and checks_available:false,'
-          + ' and review the diff as carefully as you would if it were the only evidence — because it is.'),
-        '   Before you run it, run `git status --porcelain` and report it in dirty_paths. If any file of THIS slice',
-        '   is uncommitted, the check proves nothing about the commits: verified:false with a problem saying so.',
-        '4. Look specifically for: files touched outside the declared set; tests or checks weakened, skipped or',
-        '   deleted to make things pass; TODO stubs standing in for the work; commented-out assertions; except/catch',
-        '   blocks that swallow the error the check was supposed to surface; a value hardcoded where it should be derived.',
-        '',
-        DOCTRINE_REVIEW_CALIBRATION,
-        'RULES:',
-        '- Judge THIS slice only. Other slices in this run have their own verifiers; a defect that is plainly',
-        '  outside your slice belongs in problems as minor, not as a verdict on work you were not given.',
-        (HAS_CHECKS
-          ? '- verified:true REQUIRES that you ran the check and saw it pass. A read-only review is verified:false\n' +
-          '  with a problem of "not executed". Never infer a result.\n' +
-          '- If you could not run it (broken env, missing credentials), say so plainly and return verified:false.'
-          : '- This repo has no executable checks, so verified:true here means ONLY "the diff does what the slice said\n' +
-          '  and I found no defect in it". Set checks_available:false and say in summary that nothing was executed.\n' +
-          '  Do not withhold verification merely because tests do not exist — but do not overstate it either.'),
-        '- You report. You do not fix, and you do not commit.',
-      ].join('\n'),
-      { label: 'verify:' + prev.slice.id, phase: 'Verify', model: JUDGE, effort: EFFORT, schema: VERIFY_SCHEMA }
-    ).then((v) => ({ ...prev, verify: normalizeVerify(v, HAS_CHECKS) })),
-  'verify wave'
-)).filter(Boolean)
-
-const failedVerify = results.filter((r) => !r.verify || r.verify.verified !== true)
-log('implemented ' + built.length + '/' + plan.slices.length + ' slice(s); ' +
-  failedVerify.length + ' of ' + results.length + ' failed verification')
+log('implemented ' + built.length + '/' + plan.slices.length + ' slice(s)')
+// The implementers' own reports, as the adversary sees them: claims, not evidence.
+const implReports = built.map((b) => ({ slice: b.slice.id, impl: b.impl }))
 
 // ---------------------------------------------------------------------------
-// Phase 4 — Adversarial review. BARRIER: the adversary needs the whole diff.
+// Phase 3 — Adversarial review. BARRIER: the adversary needs the whole diff, and it is
+// the one lane that executes the check after the implementers' self-reported runs.
+// There is no per-slice verifier: every slice's verifier used to run the same check on
+// the same tree (a shared checkout cannot be rewound per commit) and hand a verdict to
+// the adversary, which was told to re-check it against the diff anyway. Measured over
+// six runs the phase was 12% of wall clock and 8% of tokens for verdicts the next gate
+// re-derived. The verifier's hunt list and its check run moved into the adversary.
 // ---------------------------------------------------------------------------
 function reviewPrompt(roundLabel, extra) {
   return [
@@ -1801,8 +1706,9 @@ function reviewPrompt(roundLabel, extra) {
     (violations.length ? '\nIMPLEMENTERS THAT TOUCHED A FILE ANOTHER SLICE DECLARED (two agents may have edited it at once — read those files with suspicion):\n' +
       violations.map((v) => '  ' + v.slice + ' touched ' + v.file + ', declared by ' + v.collides_with.join(', ')).join('\n') : ''),
     '',
-    'PER-SLICE VERIFICATION RESULTS:',
-    JSON.stringify(results.map((r) => ({ slice: r.slice.id, verify: r.verify })), null, 2),
+    'WHAT THE IMPLEMENTERS CLAIM — their own reports. Claims, not evidence: checks_passed is self-reported and',
+    'nobody has re-run anything since. Read the notes for files touched outside a slice and for anything left undone:',
+    JSON.stringify(implReports, null, 2),
     '',
     (extra || ''),
     'READ THE ACTUAL DIFF YOURSELF — do not review the reports:',
@@ -1810,18 +1716,28 @@ function reviewPrompt(roundLabel, extra) {
     'Set diff_reviewed:true only if you ran that and read the output.',
     'Then run `git status --porcelain` and report it verbatim in dirty_paths: anything uncommitted is work the',
     'diff does not contain, and a check that passed on it proves nothing about the branch.',
+    (HAS_CHECKS
+      ? 'RUN THE CHECK YOURSELF. ' + TEST_LINE + ' You are the only lane in this run that executes it after the code\n' +
+        'was written: paste the real tail into output_tail, the command into commands_run, and set executed:true. A\n' +
+        'failing check is a finding (critical) with the output as its failure_scenario. A review that did not run\n' +
+        'the check is executed:false and can never be clean. If you could not run it (broken env, missing\n' +
+        'credentials), say so plainly and return executed:false.'
+      : 'There is nothing executable in this repo. ' + TEST_LINE + ' Set executed:false and checks_available:false.'),
     '',
     'THE REPO YOU ARE REVIEWING: ' + (recon.ecosystem || 'unknown') +
     (HAS_CHECKS ? '. Its check command is: ' + CHECK_CMD : '. It has NO executable checks.'),
     (recon.conventions ? 'Conventions it documents, which a violation of IS a finding:\n' + recon.conventions : ''),
     '',
     'HUNT SPECIFICALLY FOR:',
-    '- Requirements in the task that NO slice implemented. The gap the plan itself missed is the finding the',
-    '  per-slice verifiers structurally cannot see, and it is the main reason you exist.',
+    '- Requirements in the task that NO slice implemented. The gap the plan itself missed is the finding no',
+    '  single implementer could see, and it is the main reason you exist.',
     '- Integration seams: an assumption slice A relies on that slice B quietly changed.',
     '- Behaviour the diff changes that no test or check covers.',
     '- Edge and error paths: empty, null, zero, negative, very large, unicode, concurrent, partial failure.',
-    '- Anything a verifier marked verified:true that the diff does not actually support.',
+    '- Anything an implementer reported done, or a check it reported passed, that the diff does not support.',
+    '- Files touched outside a slice\'s declared set; tests or checks weakened, skipped or deleted to make things',
+    '  pass; TODO stubs standing in for the work; commented-out assertions; except/catch blocks that swallow the',
+    '  error a check was supposed to surface; a value hardcoded where it should be derived.',
     '- Defects in whatever idiom this repo is written in, not just general-purpose code smells. For infrastructure',
     '  that means things like a resource replaced where it should be updated in place, state or lifecycle rules',
     '  dropped, a hardcoded account/region/environment, a secret committed, a permission widened beyond the task,',
@@ -1832,11 +1748,11 @@ function reviewPrompt(roundLabel, extra) {
     '- Under uncertainty, default to raising the finding. A false positive costs one patch; a false negative ships.',
     (HAS_CHECKS
       ? ''
-      : '- Nothing here was executed, so you are the only gate. Weigh the diff accordingly and say so in summary.'),
+      : '- Nothing here can be executed, so the diff is the only evidence. Weigh it accordingly and say so in summary.'),
     '- Every finding needs a concrete failure_scenario: specific inputs or state leading to a specific wrong',
     '  result. "This is fragile", "consider extracting", "could be clearer" are NOT findings — drop them.',
     '- Style, naming and formatting are not findings unless the repo\'s own documented convention is violated.',
-    '- clean:true ONLY if you read the whole diff and found nothing meeting that bar. Say so in summary.',
+    '- clean:true ONLY if you read the whole diff' + (HAS_CHECKS ? ', ran the check and saw it pass,' : '') + ' and found nothing meeting that bar. Say so in summary.',
     '- You review. You do not fix, and you do not commit.',
     (roundLabel ? '\nThis is ' + roundLabel + '.' : ''),
   ].join('\n')
@@ -1847,12 +1763,12 @@ function reviewPrompt(roundLabel, extra) {
 // brand-new F3 from the re-review. `re_raises` (set by a re-review) refers to these ids.
 function stampReview(rev, n) {
   if (!rev) return rev
-  const judged = judgeReview(rev)
+  const judged = judgeReview(rev, HAS_CHECKS)
   return { ...judged, findings: namespaced('r' + n, judged.findings) }
 }
 
 phase('Review')
-if (!budgetLeft(40000)) return outOfBudget('review', { never_ran: neverRan, not_implemented: notImplemented, implementation: results, failed_verification: failedVerify.map((r) => r.slice.id) })
+if (!budgetLeft(40000)) return outOfBudget('review', { never_ran: neverRan, not_implemented: notImplemented, implementation: implReports })
 let review = stampReview(await callAgent(reviewPrompt('the first review', ''), {
   label: 'adversary:r0',
   phase: 'Review',
@@ -1867,7 +1783,7 @@ let reviewMissing = !review
 if (reviewMissing) log('WARNING: the adversarial review returned nothing after the fallback — this work is UNREVIEWED')
 
 // ---------------------------------------------------------------------------
-// Phase 5 — Patch rounds. Stops the moment a review comes back clean.
+// Phase 4 — Patch rounds. Stops the moment a review comes back clean.
 // ---------------------------------------------------------------------------
 const rounds = []
 let round = 0
@@ -1901,12 +1817,12 @@ while (
     (deferred.length ? ', DEFERRING ' + deferred.length + ' — ' + deferred.map((f) => f.id).join(', ') : '') +
     (handedOff.length ? '; ' + handedOff.length + ' below "' + PATCH_SEVERITY + '" handed to the orchestrator' : ''))
 
-  // Patchers used to run all at once in the shared tree, one per finding, and the
-  // verifiers kept meeting sibling patchers' uncommitted edits. Same cure as the
-  // implement phase: findings that name the same file run one after another, groups
-  // run in parallel, and every patch still gets its own verifier — run to completion
-  // BEFORE the next patcher in the group starts, or the verifier's check meets that
-  // patcher's half-written edits in the very file it is verifying.
+  // Patchers used to run all at once in the shared tree, one per finding, and kept
+  // meeting sibling patchers' uncommitted edits. Same cure as the implement phase:
+  // findings that name the same file run one after another, groups run in parallel.
+  // No per-patch verifier: the re-review reads every patch diff, judges whether the
+  // finding is genuinely closed and runs the check — the same verdict the verifier
+  // gave, re-derived, so the verifier was a second serial lane per patch for nothing.
   const patchGroups = groupByFileConflict(take.map((f) => ({ id: f.id, files: patchFootprint(f), finding: f })))
   log('round ' + round + ': ' + take.length + ' patch(es) in ' + patchGroups.length + ' file-disjoint group(s)')
 
@@ -1945,51 +1861,17 @@ while (
     ).then((p) => ({ finding: f, patch: p }))
   }
 
-  function verifyOne(prev) {
-    return callAgent(
-        [
-          'You are the VERIFIER for one patch. You did not write it.',
-          '',
-          'THE FINDING IT CLAIMS TO CLOSE:',
-          JSON.stringify(prev.finding, null, 2),
-          '',
-          'WHAT THE PATCHER CLAIMS:',
-          JSON.stringify(prev.patch, null, 2),
-          '',
-          'DO THIS:',
-          '1. `git show <commit_sha>`. Read the real diff.',
-          '2. Decide whether it actually closes the failure_scenario, or merely makes the symptom go away.',
-          '3. Check the regression test genuinely exercises the scenario — a test that would pass on the OLD',
-          '   code proves nothing. Say so if you believe it would.',
-          '4. ' + (HAS_CHECKS
-            ? 'Run the check yourself. ' + TEST_LINE + ' Paste the real output tail and set executed:true.'
-            : TEST_LINE + ' Set executed:false and checks_available:false; judge the patch on the diff alone.'),
-          '5. Check the patch broke nothing adjacent.',
-          '',
-          'If the patcher DISPUTED the finding, judge the evidence: say plainly whether the dispute holds.',
-          (HAS_CHECKS
-            ? 'verified:true requires that you ran the check and saw it pass.'
-            : 'Nothing is executable here, so verified:true means only that the diff genuinely closes the finding.'),
-          'You do not fix, and you do not commit.',
-        ].join('\n'),
-      { label: 'verify:' + prev.finding.id, phase: 'Patch', model: JUDGE, effort: EFFORT, schema: VERIFY_SCHEMA }
-    ).then((v) => ({ ...prev, verify: normalizeVerify(v, HAS_CHECKS) }))
-  }
-
-  // A patch that does not exist is not verified: a patcher that returned nothing or
-  // reported `failed` gets no Opus verifier sent to `git show undefined`. The finding
-  // is carried to the orchestrator by collectForOrchestrator either way.
+  // A patcher that returned nothing or reported `failed` is logged here; the finding is
+  // carried to the orchestrator by collectForOrchestrator either way.
   async function patchGroup(group) {
     const out = []
     for (const item of group.slices) {
       const p = await patchOne(item.finding)
       if (!p) continue
       if (!p.patch || p.patch.status === 'failed') {
-        log('patch ' + item.finding.id + ': ' + (p.patch ? 'patcher reported failed' : 'patcher returned nothing') + ' — no verifier sent')
-        out.push({ ...p, verify: null })
-        continue
+        log('patch ' + item.finding.id + ': ' + (p.patch ? 'patcher reported failed' : 'patcher returned nothing'))
       }
-      out.push(await verifyOne(p))
+      out.push(p)
     }
     return out
   }
@@ -2013,16 +1895,19 @@ while (
     reviewPrompt(
       'review round ' + round + ' of at most ' + MAX_ROUNDS,
       [
-        'PATCHES APPLIED SINCE THE LAST REVIEW:',
-        JSON.stringify(done.map((p) => ({ finding_id: p.finding.id, claim: p.finding.claim, patch: p.patch, verify: p.verify })), null, 2),
+        'PATCHES APPLIED SINCE THE LAST REVIEW — the patchers\' own reports; checks_passed is self-reported and',
+        'nobody has verified a patch before you. `git show <commit_sha>` each one:',
+        JSON.stringify(done.map((p) => ({ finding_id: p.finding.id, claim: p.finding.claim, failure_scenario: p.finding.failure_scenario, patch: p.patch })), null, 2),
         (deferred.length ? 'DEFERRED, NOT PATCHED (already on the orchestrator\'s list; do not re-raise unless a patch made one worse): ' +
           deferred.map((f) => f.id + ' (' + f.claim + ')').join(' | ') : ''),
         (handedOff.length ? 'HANDED TO THE ORCHESTRATOR, NOT PATCHED (below the auto-patch severity; already on their list; do not re-raise unless a patch made one worse): ' +
           handedOff.map((f) => f.id + ' (' + f.claim + ')').join(' | ') : ''),
         '',
         'Two jobs this round, and the second is the one people forget:',
-        '(a) Is each patched finding above GENUINELY closed? A patch that moves the symptom is not a fix. If not, raise it',
-        '    again as a finding with `re_raises` set to the earlier id (e.g. "r0:F2") so it is not counted twice.',
+        '(a) Is each patched finding above GENUINELY closed? Read the patch diff: does it close the failure_scenario or',
+        '    merely make the symptom go away; does the regression test exercise the scenario, or would it pass on the',
+        '    old code? If not closed, raise it again as a finding with `re_raises` set to the earlier id (e.g. "r0:F2")',
+        '    so it is not counted twice.',
         '(b) Did the patches themselves introduce anything new? Patch rounds are written under time pressure and',
         '    are a common source of fresh defects. Review their diffs as adversarially as the original work.',
         'A finding the patcher disputed with sound evidence should NOT be re-raised — say so in summary instead; the',
@@ -2073,17 +1958,17 @@ if (laneErrors.length) {
 
 // ok is mechanical: true only when the run completed AND every gate passed. Every
 // reason it did not is listed in not_ok, so a consumer keying off ok alone cannot
-// mistake a half-built, unverified, unreviewed or dirty run for a success. The rest
+// mistake a half-built, unexecuted, unreviewed or dirty run for a success. The rest
 // of the report is still here either way — the work exists on the branch.
 const notOk = []
 if (reviewMissing) notOk.push('the adversarial review returned nothing after its fallback: the work is unreviewed')
 if (neverRan.length) notOk.push(neverRan.length + ' slice(s) never ran: ' + neverRan.join(', '))
 if (notImplemented.length) notOk.push(notImplemented.length + ' slice(s) not implemented (no implementer result): ' + notImplemented.join(', '))
-if (failedVerify.length) notOk.push(failedVerify.length + ' slice(s) failed verification: ' + failedVerify.map((r) => r.slice.id).join(', '))
 if (plan.uncovered && plan.uncovered.length) notOk.push('the slicer left scope uncovered: ' + plan.uncovered.join(' | '))
 if (violations.length) notOk.push(violations.length + ' undeclared file(s) touched inside another group\'s footprint: ' + violations.map((v) => v.slice + ' -> ' + v.file).join(', '))
 if (uncommittedAtReview) notOk.push('uncommitted changes in the tree at review time (not in the reviewed diff): ' + uncommittedAtReview.slice(0, 300))
 if (review && review.diff_reviewed !== true) notOk.push('the final review did not read the diff (diff_reviewed:false)')
+if (review && HAS_CHECKS && review.executed !== true) notOk.push('the final review did not run the check command (executed:false): nothing independent executed the suite')
 if (review && openFindings.length) notOk.push('the final review is not clean: ' + openFindings.length + ' finding(s) open')
 if (notOk.length) log('NOT OK — ' + notOk.join('; '))
 
@@ -2100,7 +1985,7 @@ return {
     branch: recon.branch || '',
     check_command: CHECK_CMD || null,
     // The honest caveat: false means no lane in this run executed anything, so
-    // every "verified" below rests on reading alone. Report it, do not bury it.
+    // the review's verdict rests on reading alone. Report it, do not bury it.
     executable_checks: HAS_CHECKS,
     other_checks: (recon.verify_commands || []).slice(1),
   },
@@ -2114,21 +1999,16 @@ return {
   // writer took because there was no owner to ask.
   documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null, doc_rounds: DOC_ROUNDS, pause_for_owner: PAUSE_FOR_OWNER },
   models: {
-    implement: CODER, verify: JUDGE, review: JUDGE, effort: EFFORT, max_concurrent: WAVE,
+    implement: CODER, review: JUDGE, effort: EFFORT, max_concurrent: WAVE,
     // Lanes whose primary model returned nothing and were re-run once on the other
     // tier. A verdict from a fallback lane is still a verdict, but say which model gave it.
     fallbacks: { enabled: FALLBACK, coder: CODER_FALLBACK, judge: JUDGE_FALLBACK, used: fallbacksUsed },
   },
   plan: { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [] },
-  implementation: results.map((r) => ({
-    slice: r.slice.id,
-    impl: r.impl,
-    verified: r.verify ? r.verify.verified : null,
-    problems: r.verify ? r.verify.problems : null,
-  })),
-  failed_verification: failedVerify.map((r) => r.slice.id),
+  // The implementers' own reports, unjudged: the adversary's findings are the verdict on them.
+  implementation: implReports,
   // Slices the runtime dropped before an implementer ran, and slices whose implementer
-  // (and its fallback) returned nothing: neither has a commit to verify.
+  // (and its fallback) returned nothing: neither has a commit to review.
   never_ran: neverRan,
   not_implemented: notImplemented,
   uncommitted_at_review: uncommittedAtReview,

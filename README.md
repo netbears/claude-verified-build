@@ -1,12 +1,12 @@
 # verified-build
 
 A Claude Code skill and the saved Workflow it drives: from an idea, a spec or a plan to
-verified, adversarially reviewed code, with the owner asked only the questions that are
-theirs and told the cost before a line of code is written.
+adversarially reviewed code, with the owner asked only the questions that are theirs
+and told the cost before a line of code is written.
 
 **Opus writes the spec and attacks it. Opus writes the plan and attacks it. Sonnet
-implements. Opus verifies every commit against the real diff and re-runs the repo's check
-command. Opus attacks the whole. Sonnet patches what matters. Opus re-attacks.** Nothing is
+implements. Opus attacks the whole diff and re-runs the repo's check command. Sonnet
+patches what matters. Opus re-attacks.** Nothing is
 called done because the model that wrote it said so, and what the last pass leaves standing
 is closed by hand, at every severity, before the result is reported.
 
@@ -34,12 +34,11 @@ flowchart TD
     SL --> C{cost gate<br/>USD at API list prices}
     C -- approve --> IM[Implement<br/><i>sonnet</i>, one fresh agent per slice, TDD, chains serialised, groups in parallel]
     C -- stop --> X([documents committed, no code])
-    IM --> V[Verify<br/><i>opus</i>, one per slice: git show the real diff, re-run the check]
-    V --> A[Adversarial review<br/><i>opus</i> reads the whole diff and hunts for what no slice did]
+    IM --> A[Adversarial review<br/><i>opus</i> reads the whole diff, re-runs the check, hunts for what no slice did]
     A --> F{findings?}
     F -- none --> DONE([result])
-    F -- critical / major --> PT[Patch<br/><i>sonnet</i> per finding, grouped by file, root cause first → <i>opus</i> verifies each]
-    PT --> A2[Re-review<br/><i>opus</i>: are they closed, and did the patches break anything?]
+    F -- critical / major --> PT[Patch<br/><i>sonnet</i> per finding, grouped by file, root cause first]
+    PT --> A2[Re-review<br/><i>opus</i>: reads every patch diff, re-runs the check: closed, and nothing broken?]
     A2 --> DONE
     F -- minor --> DONE
     DONE --> O[Orchestrator closes every leftover by hand, then reports:<br/>decisions first, verdict, leftovers, cost]
@@ -57,14 +56,13 @@ flowchart TD
 | Slice | Opus | one task = one slice, pointers not pastes, chains longer than four merged | |
 | Cost gate | — | spent so far, ahead with a low–high band, total, at API list prices | **pause** until approved |
 | Implement | Sonnet | one fresh agent per slice; a commit each | |
-| Verify | Opus | one verifier per slice: the real diff, the check re-run | |
-| Adversarial review | Opus | findings with a concrete failure scenario, or `clean:true` | |
-| Patch (1 round) | Sonnet + Opus | critical and major findings only, grouped by file; each patch verified | |
-| Re-review | Opus | closed? and did the patches introduce anything? | |
+| Adversarial review | Opus | the whole diff read, the check re-run, the implementers' reports judged as claims; findings with a concrete failure scenario, or `clean:true` | a review that did not run the check is never clean |
+| Patch (1 round) | Sonnet | critical and major findings only, grouped by file | |
+| Re-review | Opus | every patch diff read, the check re-run: closed? and did the patches introduce anything? | |
 | Orchestrator | you | closes every leftover at every severity by hand, then reports | |
 
-Nothing is lost quietly. `ok` is mechanical: true only when every slice was implemented
-and verified, the adversary read the diff and found nothing, no scope was left uncovered,
+Nothing is lost quietly. `ok` is mechanical: true only when every slice was implemented,
+the adversary read the diff, ran the check and found nothing, no scope was left uncovered,
 no implementer touched a file another slice had declared, and nothing was uncommitted at
 review time — otherwise `not_ok` lists the reasons. A lane that returns nothing or throws
 — primary and fallback alike — is recorded in `lane_errors`; a slice with no implementer
@@ -146,13 +144,14 @@ that repo's own scripts on your machine, as any test runner would. The repo's `C
 and `AGENTS.md` are quoted into every prompt as binding conventions. Launch only on repos
 whose scripts and instructions you would run by hand.
 
-**Known limits.** The tree is shared: implementers in different groups and up to `wave`
-verifiers run at once in one checkout. Implementers commit by pathspec (`git commit --
+**Known limits.** The tree is shared: implementers (and patchers) in different groups run
+at once in one checkout, up to `wave` of them. Implementers commit by pathspec (`git commit --
 <files>`) and never sweep, a slice with no declared files runs with nothing else live, and
 a file touched inside another slice's footprint is reported and held against the run — but
 a check command that cannot tolerate two concurrent runs (one dev database, one fixed temp
-path) can fail spuriously; pass a `testCmd` that can, or expect a re-run. Verifiers run the
-check on the tree as it stands after the implement phase, not checked out per commit. The
+path) can fail spuriously; pass a `testCmd` that can, or expect a re-run. The adversary runs
+the check on the tree as it stands after the implement phase, not checked out per commit;
+there is no per-slice verifier (see the changelog for v1.3.0). The
 runtime's worktree isolation is not used because each slice's commits would land on a
 different worktree. Recon runs the check commands it finds before any gate; launch only on
 repos whose scripts you would run by hand. The front half (spec, plan, their reviews, the recorder) has been run against a

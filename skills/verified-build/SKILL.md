@@ -1,12 +1,13 @@
 ---
 name: verified-build
-description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Opus writes the spec, adversarially reviews it and folds the findings in, then writes the implementation plan, reviews and folds that in; then Sonnet writes the code in parallel waves of 15, Opus verifies every commit against the real diff and re-runs the repo's check command, Opus adversarially reviews the combined diff, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
+description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Opus writes the spec, adversarially reviews it and folds the findings in, then writes the implementation plan, reviews and folds that in; then Sonnet writes the code in parallel waves of 15, Opus adversarially reviews the combined diff and re-runs the repo's check command, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
 ---
 
-# /verified-build — spec it, plan it, write it cheap, verify it independently, then attack it
+# /verified-build — spec it, plan it, write it cheap, then attack it
 
 Opus writes the spec and attacks it. Opus writes the plan and attacks it. Sonnet
-implements. Opus verifies. Opus attacks. Sonnet patches what matters. Opus re-attacks.
+implements. Opus attacks the whole diff and re-runs the check. Sonnet patches what
+matters. Opus re-attacks.
 Nothing is called done because the model that wrote it said so — and what the last
 pass leaves standing is yours to close by hand, not a second round's.
 
@@ -70,13 +71,11 @@ for anything else in the session on the strength of this skill.
 ## One agent per slice, always
 
 Slices that declare a common file are *serialised* — they run one after another,
-each in its own fresh agent, and each gets its own Opus verifier reading its own
-commits. File overlap costs wall-clock and nothing else. The engine never merges two
-slices into one context, and never widens what a single verifier has to read. A slice
-that declares **no** files has an unknown footprint, so it runs after the grouped slices
+each in its own fresh agent. File overlap costs wall-clock and nothing else. The engine
+never merges two slices into one context. A slice that declares **no** files has an unknown footprint, so it runs after the grouped slices
 with nothing else live; the same holds for a finding without a file in a patch round.
 
-**The tree is shared.** Every implementer, patcher and verifier works in this
+**The tree is shared.** Every implementer, patcher and reviewer works in this
 session's checkout — the runtime's worktree isolation would put each slice's commits
 on a different worktree, so the engine does not use it. Consequences you should know
 before you launch: implementers and patchers commit **by pathspec** (`git add <file>`,
@@ -85,25 +84,33 @@ and never sweep; a file an implementer touched outside its slice that another sl
 declared comes back in `footprint_violations` and counts against the run; a
 check command that two agents run at once must tolerate that (a suite that writes to
 one dev database or one fixed temp path may fail spuriously — pass a `testCmd` that
-does not, or accept that a verifier may need a re-run); and a declared directory or
+does not, or accept that the adversary may need a re-run); and a declared directory or
 glob collides with every path under it, so declare precisely or expect a serial run.
 
-**What "verified every commit" means here.** Each verifier reads its own slice's
-commits (`git show`, diff by diff) and runs the check command on the tree **as it stands
-after the whole implement phase**, not checked out at that commit — a shared tree cannot
-be rewound per slice. It also reports `git status --porcelain`: a check that passed on
-uncommitted edits proves nothing about the commits, and the adversary's dirty paths are
-held against the run (`uncommitted_at_review`).
+**There is no per-slice verifier, since v1.3.0.** The adversary is the one gate after
+the implementers: it reads the whole diff from the base sha, is handed every
+implementer's report *as a claim*, runs the check command itself on the tree **as it
+stands after the whole implement phase** (a shared tree cannot be rewound per commit),
+and reports `executed`, `commands_run` and `output_tail`. Where the repo has a check, a
+review that did not run it is never clean. It also reports `git status --porcelain`: a
+check that passed on uncommitted edits proves nothing about the commits, and its dirty
+paths are held against the run (`uncommitted_at_review`). The per-slice verifiers used
+to run that same check N times on that same tree and hand verdicts the adversary was
+told to re-derive from the diff anyway — 12% of wall clock and 8% of tokens over six
+runs for nothing the next gate did not repeat. Patches are treated the same way: no
+patch verifier; the re-review reads every patch diff, judges whether the finding is
+genuinely closed and whether the regression test would pass on the old code, and runs
+the check.
 
 Two rules the planner now follows, because a serialised slice is not free (every one
 is a cold agent reading the repo and its spec): a chain longer than four is merged
-into fewer, larger slices, each still with its own agent and verifier; and when the
+into fewer, larger slices, each still with its own fresh agent; and when the
 task points at a plan document, a slice gets its section as a **pointer** (path,
 heading, line range) and is told to read only that and the document's global
 constraints. Implementers and patchers are handed the planner's `task_summary`,
 not your full `task` — so state every hard constraint in a form a summary will
-carry, and put the spec's path in the task. Verifiers and the adversary still read
-the whole `task`; it remains the bar.
+carry, and put the spec's path in the task. The adversary still reads the whole
+`task`; it remains the bar.
 
 ## It is repo-agnostic — do not hand-tune it per repo
 
@@ -222,7 +229,7 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `answers` | — | `[{id, answer}]` for the questions a paused run returned (ids look like `spec:Q1`); pass on the resume, keeping earlier answers; order does not matter |
 | `probeModels` | `true` | one trivial call per primary model before Recon; `ok:false, stage:'probe'` names a model this account cannot use. `false` skips it |
 | `testCmd` | discovered by Recon | exact command every lane runs; overrides discovery, and Recon's "nothing executable" |
-| `wave` | `15` | max agents live at once: parallel groups while implementing, parallel verifiers after (capped at 16, and by the runtime's own `min(16, cpus-2)`) |
+| `wave` | `15` | max agents live at once: parallel groups while implementing and patching (capped at 16, and by the runtime's own `min(16, cpus-2)`) |
 | `maxSlices` | `15` | max parallel slices the planner may cut (capped at 20) |
 | `maxRounds` | `1` | max review→patch→re-review rounds (capped at 4; `0` = review only, no patching). Was 2 until 2026-09-11 — see "Tuned from six runs" |
 | `patchSeverity` | `major` | only findings at or above this severity are auto-patched (`critical` \| `major` \| `minor`); the rest are handed back in `open_findings` and `patch_rounds[].handed_off` |
@@ -230,7 +237,7 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `allowDirty` | `false` | run despite a dirty tree — only when those changes are genuinely part of the task |
 | `allowTrunk` | `false` | run on the shared trunk. Almost always the wrong answer; branch instead |
 | `fallback` | `true` | retry a lane once on the other tier when its primary model returns nothing (terminal API error such as `529 Overloaded`). `false` disables |
-| `judgeFallback` | `fable` | model the Opus judge lanes (plan, verify, adversary, patch-verify) retry on |
+| `judgeFallback` | `fable` | model the Opus judge lanes (spec and plan writers, document reviewers and fold-ins, slicer, adversary) retry on |
 | `coderFallback` | `opus` | model the Sonnet lanes (recon, implement, patch) retry on |
 
 Pass a plain string instead of an object and it is taken as `task`.
@@ -308,13 +315,13 @@ or "The cost gate" above (`stage` says which), not reported as a result. Then ch
 and `stage`.
 
 **`ok` is mechanical.** It is `true` only when the run completed and every gate passed:
-every slice implemented and verified, the adversary read the diff and found nothing,
+every slice implemented, the adversary read the diff, ran the check and found nothing,
 no scope left uncovered, no undeclared file touched inside another slice's footprint,
 nothing uncommitted at review time. Anything else is `ok:false` with **`not_ok`**, a
-list of the reasons in plain words — read it out. A verifier's `verified:true` without
-`executed:true` is downgraded by the engine where the repo has checks, and a reviewer's
-`clean:true` over a non-empty findings list (or without `diff_reviewed`) is treated as
-not clean (the reviewer's own word is kept as `claimed_clean`).
+list of the reasons in plain words — read it out. A reviewer's `clean:true` over a
+non-empty findings list, without `diff_reviewed`, or — where the repo has checks —
+without `executed:true` is treated as not clean (the reviewer's own word is kept as
+`claimed_clean`).
 
 - `stage:'probe'` — a pinned model is not usable from this session; nothing ran.
 - `stage:'recon'` — the run never started: report the reason (dirty tree, trunk, not a
@@ -324,7 +331,7 @@ not clean (the reviewer's own word is kept as `claimed_clean`).
 - `stage:'spec-review'` / `'plan-review'` — a document reviewer or fold-in author
   returned nothing; the document is committed but that gate never ran. Relaunch.
 - `stage:'record'` — the recorder returned nothing; no code was built. Relaunch.
-- `stage:'implement'` / `'verify'` / `'review'` with an `error` naming the token budget —
+- `stage:'implement'` / `'review'` with an `error` naming the token budget —
   the turn's "+Nk" ceiling was nearly spent and the engine stopped between phases with a
   partial report rather than a wall of lost lanes; `lane_errors` and whatever ran are in it.
 - `stage:'review'` with `review_missing:true` — the work was implemented but **the
@@ -332,7 +339,7 @@ not clean (the reviewer's own word is kept as `claimed_clean`).
   then carries every finding of the last round because nothing confirmed any of them
   closed. Say "unreviewed" in the headline; a run like this is never clean.
 - `stage:'implement'` with `never_ran` non-empty — the runtime dropped those slices before
-  an implementer ran; they have no commits and no verifier.
+  an implementer ran; they have no commits.
 
 Otherwise the return value is structured. Report these, and in this order:
 
@@ -355,16 +362,15 @@ Otherwise the return value is structured. Report these, and in this order:
    **every** severity: the last review's `open_findings`; everything any round
    handed off (below `patchSeverity`) or deferred (past the per-round cap); and
    every finding a round tried to patch that did not come back closed — the patcher
-   returned nothing, reported `failed`, disputed it, or the patch verifier would not
-   sign it off. Each carries its `source`; a dispute's source quotes the patcher's
+   returned nothing, reported `failed`, or disputed it. Each carries its `source`; a dispute's source quotes the patcher's
    evidence. Finding ids are namespaced by the review that raised them (`r0:F1` from
    the first pass, `r1:F1` from the re-review), and a re-review finding whose
    `re_raises` names an earlier id has replaced it. `for_orchestrator_by_severity`
    gives the counts. This list is not a footnote and it is not the user's to-do — it
    is yours; see "Close the leftovers yourself" below. If `stopped_at_round_cap` is
    true the review-left findings were never patched at all.
-4. **`failed_verification`** — slices whose commits a verifier would not sign off
-   (including a verifier that did not run the check). **`not_implemented`** — slices
+4. **`implementation`** — every implementer's own report, unjudged: the adversary's
+   findings are the verdict on them. **`not_implemented`** — slices
    whose implementer (and its fallback) returned nothing; **`lane_errors`** — every
    lane that returned nothing or threw, with the reason, primary and fallback alike.
    **`footprint_violations`** — files an implementer touched outside its slice that
@@ -378,7 +384,7 @@ Otherwise the return value is structured. Report these, and in this order:
    Also glance at **`plan.groups`** vs **`plan.largest_group`**: a `largest_group`
    equal to the slice count means every slice's declared files overlapped
    transitively, so the run was fully sequential. That is slow, not broken — every
-   slice still got its own agent and its own verifier — but it usually means the
+   slice still got its own fresh agent — but it usually means the
    planner (or your `task`) drew the file boundaries badly, and the engine logs a
    WARNING when it happens.
 6. **`patch_rounds[].deferred`** — findings dropped past the 15-per-round cap;
@@ -388,14 +394,15 @@ Otherwise the return value is structured. Report these, and in this order:
 7. **`patch_rounds[].patched[].patch.status === 'disputed'`** — the patcher argued
    the finding was wrong. It is already in `for_orchestrator` with the evidence in
    its `source`; judge it there. Do not quietly treat it as fixed, and do not quietly
-   treat it as broken either. A patch with `verify: null` had no verifier because
-   there was nothing to verify (the patcher returned nothing or reported `failed`).
+   treat it as broken either. A patch reported `fixed` is closed on the patcher's word
+   plus the re-review's silence: the re-review reads every patch diff and re-raises
+   what is not genuinely closed.
 8. **`models.fallbacks.used`** — lanes whose primary model returned nothing and were
    re-run once on the fallback tier (`label`, `primary`, `fallback` per entry). Say
-   which verdicts came from the fallback model: "verified by Fable because Opus was
-   overloaded" is a different sentence from "verified by Opus", and a Fable lane billed
-   at ~2x Opus. A lane still `null` after its fallback appears in `failed_verification`
-   exactly as before.
+   which verdicts came from the fallback model: "reviewed by Fable because Opus was
+   overloaded" is a different sentence from "reviewed by Opus", and a Fable lane billed
+   at ~2x Opus. A lane still `null` after its fallback appears in `lane_errors`, and if
+   it was the adversary the run is `review_missing`.
 
 Then give the user the diff command from `diff_command` so they can read the whole
 thing themselves — after you have closed the leftovers, so the diff they read is the
@@ -460,17 +467,19 @@ So, four changes, all in the engine:
 2. `patchSeverity` defaults to **major**: minors are not auto-patched. They were
    ~40% of what got patched and where patchers most often invented things.
 3. Patchers are **grouped by the file the finding names** and serialised within a
-   group, exactly like implementers; verifiers still run in parallel. Before this,
-   every patcher ran at once in the shared tree and verifiers kept meeting sibling
-   patchers' uncommitted edits.
+   group, exactly like implementers. Before this, every patcher ran at once in the
+   shared tree and kept meeting sibling patchers' uncommitted edits.
 4. Implementers and patchers get the planner's **`task_summary`** instead of the
    full task, and slices point at their section of a plan document rather than
    reading it whole. Long serial chains are merged (see above).
 
-Not changed, deliberately: one verifier per slice, the full-task adversary, and
-the Sonnet/Opus split. The measured fix for the class of defect that slipped three
-patch verifiers (a repo guard test outside the smoke set) lives in the repo, not
-here: put every closed-vocabulary guard in the smoke set.
+Not changed then: the full-task adversary and the Sonnet/Opus split. The per-slice
+verifier (12% / 8% in the table) and the per-patch verifier were removed in v1.3.0,
+see "There is no per-slice verifier" above: their verdicts were re-derived by the
+adversary and the re-review respectively, and they ran the same check on the same
+tree N times. The measured fix for the class of defect that slipped three patch
+verifiers (a repo guard test outside the smoke set) lives in the repo, not here: put
+every closed-vocabulary guard in the smoke set.
 
 ## Why these models, and what it costs
 
@@ -481,8 +490,8 @@ by hand.
 
 **Fallback tiers.** `agent()` returns nothing when a subagent dies on a terminal API
 error after the runtime's own retries — a `529 Overloaded` storm, typically — and a
-verifier that returned nothing is a slice nobody checked. So every lane retries **once**
-on the other tier: the Opus judge lanes (plan, verify, adversary, patch-verify) fall back
+an adversary that returned nothing is a diff nobody reviewed. So every lane retries **once**
+on the other tier: the Opus judge lanes (writers, document reviewers, slicer, adversary) fall back
 to Fable, and the Sonnet lanes (recon, implement, patch) fall back to Opus. The retry is
 a separate agent with a `:fb-<model>` label, it is recorded in `models.fallbacks.used`,
 and the run logs it at the end. It exists because on 2026-09-03 Opus was overloaded for

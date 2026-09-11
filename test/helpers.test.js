@@ -7,7 +7,7 @@ const H = loadHelpers([
   'normPath', 'expandBraces', 'pathsOverlap', 'declaredFiles', 'groupByFileConflict',
   'severityRank', 'mergePrices', 'priceOf', 'lineCost', 'estimateRun',
   'namespaced', 'parseAnswers', 'collectForOrchestrator', 'looksLikePath',
-  'footprintViolations', 'patchFootprint',
+  'footprintViolations', 'patchFootprint', 'judgeReview',
 ], { consts: ['DEFAULT_PRICES', 'RECON_SCHEMA'] })
 
 test('recon must report today as a YYYY-MM-DD date: required, with a pattern the runtime enforces', () => {
@@ -121,10 +121,10 @@ test('collectForOrchestrator carries open, handed-off, deferred and unclosed pat
     handed_off: [{ id: 'r0:F5', severity: 'minor', claim: 'minor' }],
     deferred: [{ id: 'r0:F6', severity: 'major', claim: 'deferred' }],
     patched: [
-      { finding: { id: 'r0:F1', severity: 'critical' }, patch: { status: 'fixed' }, verify: { verified: true } },
-      { finding: { id: 'r0:F2', severity: 'major' }, patch: { status: 'fixed' }, verify: { verified: false } },
-      { finding: { id: 'r0:F3', severity: 'major' }, patch: { status: 'disputed', notes: 'evidence' }, verify: { verified: true } },
-      { finding: { id: 'r0:F4', severity: 'major' }, patch: null, verify: null },
+      { finding: { id: 'r0:F1', severity: 'critical' }, patch: { status: 'fixed' } },
+      { finding: { id: 'r0:F2', severity: 'major' }, patch: { status: 'fixed' } },
+      { finding: { id: 'r0:F3', severity: 'major' }, patch: { status: 'disputed', notes: 'evidence' } },
+      { finding: { id: 'r0:F4', severity: 'major' }, patch: null },
     ],
   }]
   const out = H.collectForOrchestrator(open, rounds, true)
@@ -132,7 +132,7 @@ test('collectForOrchestrator carries open, handed-off, deferred and unclosed pat
   assert.equal(got['r1:F1'], 'final review')
   assert.equal(got['r1:F2'], 'final review')
   assert.equal(got['r0:F2'], undefined, 're-raised under r1:F1, so not duplicated')
-  assert.equal(got['r0:F1'], undefined, 'fixed and verified, closed')
+  assert.equal(got['r0:F1'], undefined, 'fixed and not re-raised by the final review: closed')
   assert.match(got['r0:F3'], /disputed/)
   assert.match(got['r0:F4'], /no patch/)
   assert.match(got['r0:F5'], /handed off/)
@@ -143,7 +143,7 @@ test('collectForOrchestrator carries open, handed-off, deferred and unclosed pat
 
 test('collectForOrchestrator with no final review carries every patched finding', () => {
   const rounds = [{ round: 1, handed_off: [], deferred: [],
-    patched: [{ finding: { id: 'r0:F1', severity: 'major' }, patch: { status: 'fixed' }, verify: { verified: true } }] }]
+    patched: [{ finding: { id: 'r0:F1', severity: 'major' }, patch: { status: 'fixed' } }] }]
   const out = H.collectForOrchestrator([], rounds, false)
   assert.equal(out.length, 1)
   assert.match(out[0].source, /no final review/)
@@ -211,4 +211,18 @@ test('mergePrices ignores a negative override', () => {
   const p = H.mergePrices(H.DEFAULT_PRICES, { sonnet: { in: -3, out: 0 } })
   assert.equal(p.sonnet.in, H.DEFAULT_PRICES.sonnet.in)
   assert.equal(p.sonnet.out, 0)
+})
+
+test('judgeReview: clean needs the diff read, no findings, and the check run where the repo has one', () => {
+  const base = { clean: true, diff_reviewed: true, executed: true, findings: [], summary: 's' }
+  assert.equal(H.judgeReview(base, true).clean, true)
+  assert.equal(H.judgeReview({ ...base, executed: false }, true).clean, false, 'a read-only review is not clean where checks exist')
+  assert.equal(H.judgeReview({ ...base, executed: false }, false).clean, true, 'without checks, reading the diff is the whole gate')
+  assert.equal(H.judgeReview({ ...base, diff_reviewed: false }, false).clean, false)
+  assert.equal(H.judgeReview({ ...base, findings: [{ id: 'F1' }] }, true).clean, false)
+  const j = H.judgeReview({ ...base, executed: false, dirty_paths: ' M a.js\n' }, true)
+  assert.equal(j.claimed_clean, true)
+  assert.equal(j.executed, false)
+  assert.equal(j.dirty_paths, ' M a.js')
+  assert.ok(H.logs.some((l) => /without running the check/.test(l)))
 })

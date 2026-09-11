@@ -45,13 +45,12 @@ function table(over) {
     'plan-answers': { folded: [], refuted: [], commit_sha: 'a2', summary: 'answers recorded' },
     slice: { shared_context: 'ctx', task_summary: 'brief', slices: SLICES, uncovered: [] },
     'impl:*': (label) => ({ slice_results: [{ id: label.split(':')[1], status: 'done', commit_sha: 'c1', files_touched: [], checks_run: 'node --test', checks_passed: true, notes: '' }] }),
-    'verify:*': { verified: true, executed: true, commands_run: 'node --test', output_tail: 'ok', checks_available: true, problems: [], summary: 'ok' },
-    'adversary:r0': { clean: false, diff_reviewed: true, summary: 'two', findings: [
+    'adversary:r0': { clean: false, diff_reviewed: true, executed: true, commands_run: 'node --test', output_tail: 'ok', summary: 'two', findings: [
       { id: 'F1', severity: 'major', file: 'src/a.js', claim: 'bug', failure_scenario: 'x -> crash' },
       { id: 'F2', severity: 'minor', file: 'src/b.js', claim: 'nit', failure_scenario: 'y -> wrong' },
     ] },
     'patch:*': (label) => ({ finding_id: label.split(':').slice(1).join(':'), status: 'fixed', commit_sha: 'c9', regression_test: 't', checks_passed: true, notes: '' }),
-    'adversary:r1': { clean: true, diff_reviewed: true, findings: [], summary: 'clean' },
+    'adversary:r1': { clean: true, diff_reviewed: true, executed: true, commands_run: 'node --test', output_tail: 'ok', findings: [], summary: 'clean' },
   }
   return Object.assign(t, over || {})
 }
@@ -117,8 +116,10 @@ test('a partial price override still yields a finite total, and maxUsd passes on
   assert.equal(b.out.paused, false, 'a finite total under the ceiling passes the gate')
 })
 
-test('approved run: implements, verifies, reviews, patches the major, re-reviews clean, hands the minor to the orchestrator', async () => {
+test('approved run: implements, reviews, patches the major, re-reviews clean, hands the minor to the orchestrator', async () => {
   const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true })
+  assert.ok(!labels.some((l) => l.startsWith('verify:')), 'no per-slice or per-patch verifier lane exists: ' + labels.join(','))
+  assert.ok(labels.indexOf('adversary:r0') > labels.indexOf('impl:s2'), 'the adversary runs straight after the implementers')
   assert.equal(out.ok, true)
   assert.equal(out.paused, false)
   assert.equal(out.review_missing, false)
@@ -127,7 +128,6 @@ test('approved run: implements, verifies, reviews, patches the major, re-reviews
   assert.deepEqual(out.not_implemented, [])
   assert.deepEqual(out.lane_errors, [])
   assert.ok(labels.includes('patch:r0:F1'), 'the major is patched under its namespaced id')
-  assert.ok(labels.includes('verify:r0:F1'))
   assert.ok(!labels.includes('patch:r0:F2'), 'the minor is not auto-patched')
   assert.deepEqual(out.for_orchestrator.map((f) => f.id), ['r0:F2'])
   assert.match(out.for_orchestrator[0].source, /handed off/)
@@ -208,14 +208,14 @@ test('an implementer that throws is a recorded lane error, not a dropped group, 
   assert.deepEqual(out.never_ran, [])
   assert.equal(out.lane_errors.length, 1)
   assert.match(out.lane_errors[0].error, /budget/)
-  assert.ok(labels.includes('verify:s2'), 'the verifier still runs and will fail the slice')
+  assert.ok(labels.includes('adversary:r0'), 'the adversary still reviews what did land')
 })
 
 test('a fallback lane is recorded and its label carries the tier', async () => {
-  const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true }, { 'verify:s1': (label) => (label.endsWith(':fb-fable') ? table()['verify:*'] : null) })
+  const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true }, { 'adversary:r0': (label) => (label.endsWith(':fb-fable') ? table()['adversary:r0'] : null) })
   assert.equal(out.ok, true)
-  assert.ok(labels.includes('verify:s1:fb-fable'))
-  assert.deepEqual(out.models.fallbacks.used, [{ label: 'verify:s1', primary: 'opus', fallback: 'fable' }])
+  assert.ok(labels.includes('adversary:r0:fb-fable'))
+  assert.deepEqual(out.models.fallbacks.used, [{ label: 'adversary:r0', primary: 'opus', fallback: 'fable' }])
   assert.equal(out.lane_errors.length, 1)
 })
 
@@ -235,23 +235,23 @@ test('a re-review that returns nothing carries every patched finding to the orch
   assert.match(out.for_orchestrator.find((f) => f.id === 'r0:F1').source, /no final review/)
 })
 
-test('a failed, disputed or unverified patch is carried to the orchestrator; a re-raise is not counted twice', async () => {
+test('a failed, disputed or re-raised patch is carried to the orchestrator; a re-raise is not counted twice', async () => {
   const findings = [
     { id: 'F1', severity: 'major', file: 'src/a.js', claim: 'one', failure_scenario: 'x' },
     { id: 'F2', severity: 'major', file: 'src/b.js', claim: 'two', failure_scenario: 'x' },
     { id: 'F3', severity: 'critical', file: 'src/c.js', claim: 'three', failure_scenario: 'x' },
   ]
-  const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true }, {
-    'adversary:r0': { clean: false, diff_reviewed: true, summary: 's', findings },
+  const { out, calls } = await run({ ...BASE_ARGS, approveEstimate: true }, {
+    'adversary:r0': { clean: false, diff_reviewed: true, executed: true, summary: 's', findings },
     'patch:r0:F1': { finding_id: 'r0:F1', status: 'failed', notes: 'could not' },
     'patch:r0:F2': { finding_id: 'r0:F2', status: 'disputed', notes: 'evidence here' },
     'patch:r0:F3': { finding_id: 'r0:F3', status: 'fixed', commit_sha: 'c9', regression_test: 't', checks_passed: true, notes: '' },
-    'verify:r0:F3': { verified: false, executed: true, commands_run: 'x', output_tail: 'FAIL', checks_available: true, problems: [{ severity: 'major', what: 'no', evidence: 'e' }], summary: 'no' },
-    'adversary:r1': { clean: false, diff_reviewed: true, summary: 's', findings: [
+    'adversary:r1': { clean: false, diff_reviewed: true, executed: true, summary: 's', findings: [
       { id: 'F1', severity: 'critical', file: 'src/c.js', claim: 'three, still', failure_scenario: 'x', re_raises: 'r0:F3' }] },
   })
-  assert.ok(!labels.includes('verify:r0:F1'), 'a failed patch gets no verifier')
-  assert.ok(labels.includes('verify:r0:F2'), 'a dispute is judged')
+  const rePrompt = calls.find((c) => c.label === 'adversary:r1').prompt
+  assert.match(rePrompt, /"finding_id": "r0:F3"/, 'the re-review is handed the patch report to judge')
+  assert.match(rePrompt, /evidence here/, 'and the dispute, with its evidence')
   const byId = Object.fromEntries(out.for_orchestrator.map((f) => [f.id, f.source]))
   assert.deepEqual(Object.keys(byId).sort(), ['r0:F1', 'r0:F2', 'r1:F1'])
   assert.match(byId['r0:F1'], /patch failed/)
@@ -266,7 +266,7 @@ test('from:spec with a path: the spec is not rewritten, and every judge is told 
   assert.equal(out.ok, true)
   assert.ok(!labels.includes('spec') && !labels.includes('spec-review:r1'))
   assert.ok(labels.includes('plan-doc'))
-  for (const l of ['recon', 'slice', 'verify:s1', 'adversary:r0']) {
+  for (const l of ['recon', 'slice', 'adversary:r0']) {
     assert.match(calls.find((c) => c.label === l).prompt, /Read it whole/, l + ' is told to read the path')
   }
   assert.equal(out.documents.spec_path, 'docs/specs/2026-09-11-x.md')
@@ -317,27 +317,51 @@ test('a slice with no implementer result makes the run not ok, and not_ok names 
   assert.ok(out.not_ok.some((r) => /not implemented/.test(r)), out.not_ok.join(' | '))
 })
 
-test('a slice that failed verification makes the run not ok', async () => {
-  const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, {
-    'verify:s1': { verified: false, executed: true, commands_run: 'node --test', output_tail: 'FAIL', checks_available: true, problems: [{ severity: 'major', what: 'x', evidence: 'e' }], summary: 'no' },
-  })
-  assert.equal(out.ok, false)
-  assert.deepEqual(out.failed_verification, ['s1'])
-  assert.ok(out.not_ok.some((r) => /failed verification/.test(r)), out.not_ok.join(' | '))
+test('the adversary is told to run the check itself and is handed the implementers\' reports as claims', async () => {
+  const { calls, out } = await run({ ...BASE_ARGS, approveEstimate: true })
+  const p = calls.find((c) => c.label === 'adversary:r0').prompt
+  assert.match(p, /RUN THE CHECK YOURSELF/)
+  assert.match(p, /node --test/)
+  assert.match(p, /WHAT THE IMPLEMENTERS CLAIM/)
+  assert.match(p, /"slice": "s1"/)
+  assert.match(p, /TODO stubs/, 'the old verifier hunt list travels with the adversary')
+  assert.deepEqual(out.implementation.map((r) => r.slice), ['s1', 's2'])
+  assert.equal(out.implementation[0].impl.slice_results[0].status, 'done')
 })
 
-test('verified:true without executed:true is not a verification when the repo has checks', async () => {
+test('a final review that did not run the check cannot make the run ok when the repo has checks', async () => {
   const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, {
-    'verify:s1': { verified: true, executed: false, commands_run: '', output_tail: '', checks_available: true, problems: [], summary: 'read it' },
+    'adversary:r1': { clean: true, diff_reviewed: true, executed: false, findings: [], summary: 'read it' },
   })
-  assert.deepEqual(out.failed_verification, ['s1'])
-  assert.equal(out.implementation.find((r) => r.slice === 's1').verified, false)
-  assert.ok(out.implementation.find((r) => r.slice === 's1').problems.some((p) => /not executed/.test(p.what)))
+  assert.equal(out.ok, false)
+  assert.equal(out.final_review.clean, false)
+  assert.equal(out.final_review.claimed_clean, true)
+  assert.ok(out.not_ok.some((r) => /did not run the check/.test(r)), out.not_ok.join(' | '))
+})
+
+test('a first review with no findings but executed:false is not clean, so nothing is patched and the run is not ok', async () => {
+  const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true }, {
+    'adversary:r0': { clean: true, diff_reviewed: true, executed: false, findings: [], summary: 'skimmed' },
+  })
+  assert.ok(!labels.some((l) => l.startsWith('patch:')))
+  assert.equal(out.final_review.clean, false)
+  assert.equal(out.ok, false)
+})
+
+test('without executable checks a review that read the diff and found nothing is clean', async () => {
+  const { out, calls } = await run({ ...BASE_ARGS, approveEstimate: true }, {
+    recon: { ...RECON, verify_commands: [], primary_check_cmd: '', has_executable_checks: false },
+    'adversary:r0': { clean: true, diff_reviewed: true, executed: false, checks_available: false, findings: [], summary: 'read only' },
+  })
+  assert.equal(out.repo.executable_checks, false)
+  assert.equal(out.final_review.clean, true)
+  assert.equal(out.ok, true)
+  assert.match(calls.find((c) => c.label === 'adversary:r0').prompt, /nothing executable/i)
 })
 
 test('a review that says clean:true but lists findings is not clean: the findings are patched and reported', async () => {
   const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true }, {
-    'adversary:r0': { clean: true, diff_reviewed: true, summary: 'clean?', findings: [
+    'adversary:r0': { clean: true, diff_reviewed: true, executed: true, summary: 'clean?', findings: [
       { id: 'F1', severity: 'critical', file: 'src/a.js', claim: 'bug', failure_scenario: 'x -> crash' }] },
   })
   assert.ok(labels.includes('patch:r0:F1'), 'the critical finding was patched despite clean:true')
@@ -346,7 +370,7 @@ test('a review that says clean:true but lists findings is not clean: the finding
 
 test('a review that did not read the diff cannot make the run ok', async () => {
   const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, {
-    'adversary:r1': { clean: true, diff_reviewed: false, findings: [], summary: 'skimmed' },
+    'adversary:r1': { clean: true, diff_reviewed: false, executed: true, findings: [], summary: 'skimmed' },
   })
   assert.equal(out.ok, false)
   assert.equal(out.final_review.clean, false)
@@ -361,7 +385,7 @@ test('scope the slicer left uncovered makes the run not ok', async () => {
 
 test('uncommitted changes in the tree at review time make the run not ok', async () => {
   const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, {
-    'adversary:r0': { clean: true, diff_reviewed: true, findings: [], summary: 'clean', dirty_paths: ' M src/a.js' },
+    'adversary:r0': { clean: true, diff_reviewed: true, executed: true, findings: [], summary: 'clean', dirty_paths: ' M src/a.js' },
   })
   assert.equal(out.ok, false)
   assert.equal(out.uncommitted_at_review, ' M src/a.js')
@@ -401,7 +425,7 @@ function concurrencyTable(over) {
       return typeof base === 'function' ? base(label, prompt, opts) : base
     }
   }
-  wrap('impl:*'); wrap('patch:*'); wrap('verify:*')
+  wrap('impl:*'); wrap('patch:*')
   return { t, liveAt }
 }
 
@@ -430,7 +454,7 @@ test('two findings that share a test file are patched one after the other, and a
     { id: 'F3', severity: 'major', claim: 'three', failure_scenario: 'x' },
     { id: 'F4', severity: 'major', file: 'src/d.js', claim: 'four', failure_scenario: 'x' },
   ]
-  const { t, liveAt } = concurrencyTable({ 'adversary:r0': { clean: false, diff_reviewed: true, summary: 's', findings } })
+  const { t, liveAt } = concurrencyTable({ 'adversary:r0': { clean: false, diff_reviewed: true, executed: true, summary: 's', findings } })
   await run({ ...BASE_ARGS, approveEstimate: true }, t)
   assert.ok(!liveAt['patch:r0:F2'].includes('patch:r0:F1'), 'F2 waited for F1 (shared test file)')
   assert.deepEqual(liveAt['patch:r0:F3'].filter((l) => l.startsWith('patch:')), [], 'F3 (no file) ran with no patcher live')
@@ -508,15 +532,17 @@ test('an explicit testCmd wins even when recon found nothing executable', async 
     { recon: { ...RECON, verify_commands: [], primary_check_cmd: '', has_executable_checks: false } })
   assert.equal(out.repo.executable_checks, true)
   assert.equal(out.repo.check_command, 'make check')
-  assert.match(calls.find((c) => c.label === 'verify:s1').prompt, /Run the check YOURSELF/)
+  assert.match(calls.find((c) => c.label === 'adversary:r0').prompt, /RUN THE CHECK YOURSELF\. The command that proves this repo still works is: make check/)
 })
 
-test('within a patch group the verifier finishes before the next patcher starts', async () => {
+test('within a patch group the next patcher starts only after the previous one finished, and the re-review follows the whole round', async () => {
   const findings = [
     { id: 'F1', severity: 'major', file: 'src/a.js', claim: 'one', failure_scenario: 'x' },
     { id: 'F2', severity: 'major', file: 'src/a.js', claim: 'two', failure_scenario: 'x' },
   ]
-  const { t, liveAt } = concurrencyTable({ 'adversary:r0': { clean: false, diff_reviewed: true, summary: 's', findings } })
-  await run({ ...BASE_ARGS, approveEstimate: true }, t)
-  assert.ok(!liveAt['patch:r0:F2'].includes('verify:r0:F1'), 'F2 started while F1\'s verifier was still running checks on the same file')
+  const { t, liveAt } = concurrencyTable({ 'adversary:r0': { clean: false, diff_reviewed: true, executed: true, summary: 's', findings } })
+  const { labels } = await run({ ...BASE_ARGS, approveEstimate: true }, t)
+  assert.ok(!liveAt['patch:r0:F2'].includes('patch:r0:F1'), 'F2 started while F1 was still editing the same file')
+  assert.ok(labels.indexOf('adversary:r1') > labels.indexOf('patch:r0:F2'), 'the re-review runs after the last patcher')
+  assert.ok(!labels.some((l) => l.startsWith('verify:')), 'no patch verifier lane')
 })

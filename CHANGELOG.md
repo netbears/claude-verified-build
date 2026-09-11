@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.3.0 — 2026-09-12
+
+**The per-slice verifier and the per-patch verifier are gone; the adversary runs the check.**
+Measured over six runs the Verify phase was 12% of wall clock and 8% of tokens, and every
+verdict it produced was re-derived by the next gate: the adversary was handed the
+verification results and told to hunt for "anything a verifier marked verified:true that
+the diff does not support". Each verifier read its own slice's commits, which the adversary
+reads again in the combined diff; asked whether the slice did what it said, which the
+adversary is asked across every slice; reported `git status`, which the adversary reports;
+and ran the check command — N times, on the same tree, because a shared checkout cannot be
+rewound per commit. The patch verifier was the same shape one phase later: the re-review's
+first job is "is each patched finding genuinely closed", and the verifier sat inside every
+patch group's serial chain.
+
+So the run goes Implement → Adversarial review → Patch → Re-review. What moved rather than
+vanished: the adversary now runs the check itself and reports `executed`, `commands_run`
+and `output_tail` (a failing check is a critical finding); where the repo has a check, a
+review with `executed:false` is never `clean` and is a `not_ok` reason; the verifier's hunt
+list (files outside the declared set, weakened or skipped tests, TODO stubs, commented-out
+assertions, swallowed exceptions, hardcoded values) is in the adversary's; the adversary
+receives the implementers' own reports labelled as claims; the re-review receives the
+patchers' reports and each finding's failure scenario, and is asked whether the regression
+test would pass on the old code. A patch reported `fixed` closes on the patcher's word plus
+the re-review's silence — that was already the rule; the verifier's signature was a third
+opinion the re-review overrode either way.
+
+Gone from the result: `failed_verification`, `implementation[].verified` / `.problems`
+(`implementation` is now the raw implementer reports), `patch_rounds[].patched[].verify`,
+`models.verify`, `stage:'verify'`, and the `verify` / `patch_verify` rows of the cost
+profile — an estimate for the same plan is correspondingly lower. Within a patch group the
+next patcher starts when the previous one finishes, not when its verifier does. 66 tests.
+
 ## v1.2.0 — 2026-09-11
 
 Every guarantee the skill claimed that the engine did not enforce, from an adversarial
