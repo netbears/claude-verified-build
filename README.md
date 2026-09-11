@@ -5,8 +5,8 @@ verified, adversarially reviewed code, with the owner asked only the questions t
 theirs and told the cost before a line of code is written.
 
 **Opus writes the spec and attacks it. Opus writes the plan and attacks it. Sonnet
-implements. Opus verifies every commit against the real diff and re-runs the repo's own
-checks. Opus attacks the whole. Sonnet patches what matters. Opus re-attacks.** Nothing is
+implements. Opus verifies every commit against the real diff and re-runs the repo's check
+command. Opus attacks the whole. Sonnet patches what matters. Opus re-attacks.** Nothing is
 called done because the model that wrote it said so, and what the last pass leaves standing
 is closed by hand, at every severity, before the result is reported.
 
@@ -63,13 +63,17 @@ flowchart TD
 | Re-review | Opus | closed? and did the patches introduce anything? | |
 | Orchestrator | you | closes every leftover at every severity by hand, then reports | |
 
-Nothing is lost quietly. A lane that returns nothing or throws — primary and fallback
-alike — is recorded in `lane_errors`; a slice with no implementer result is named in
-`not_implemented`; an adversary that never returned makes the run `ok:false` with
-`review_missing:true` rather than clean; and a finding whose patch failed, was disputed
-or was not signed off stays on the orchestrator's list until a re-review explicitly
-re-raises it. The turn's token budget, where one is set, stops the run between phases
-with a partial report.
+Nothing is lost quietly. `ok` is mechanical: true only when every slice was implemented
+and verified, the adversary read the diff and found nothing, no scope was left uncovered,
+no implementer touched a file another slice had declared, and nothing was uncommitted at
+review time — otherwise `not_ok` lists the reasons. A lane that returns nothing or throws
+— primary and fallback alike — is recorded in `lane_errors`; a slice with no implementer
+result is named in `not_implemented`; a document reviewer, fold-in author, answers author
+or recorder that returns nothing stops the run before any code is built; an adversary
+that never returned makes the run `ok:false` with `review_missing:true` rather than
+clean; and a finding whose patch failed, was disputed or was not signed off stays on the
+orchestrator's list until a re-review explicitly re-raises it. The turn's token budget,
+where one is set, stops the run between phases with a partial report.
 
 Three pauses, all of the same shape: the run returns early with `paused:true`, the
 orchestrator asks the user, and the same run resumes with the answer. No prompt before a
@@ -143,11 +147,15 @@ and `AGENTS.md` are quoted into every prompt as binding conventions. Launch only
 whose scripts and instructions you would run by hand.
 
 **Known limits.** The tree is shared: implementers in different groups and up to `wave`
-verifiers run at once in one checkout. Implementers stage by file name and never sweep, but
+verifiers run at once in one checkout. Implementers commit by pathspec (`git commit --
+<files>`) and never sweep, a slice with no declared files runs with nothing else live, and
+a file touched inside another slice's footprint is reported and held against the run — but
 a check command that cannot tolerate two concurrent runs (one dev database, one fixed temp
-path) can fail spuriously; pass a `testCmd` that can, or expect a re-run. The runtime's
-worktree isolation is not used because each slice's commits would land on a different
-worktree. The front half (spec, plan, their reviews, the recorder) has been run against a
+path) can fail spuriously; pass a `testCmd` that can, or expect a re-run. Verifiers run the
+check on the tree as it stands after the implement phase, not checked out per commit. The
+runtime's worktree isolation is not used because each slice's commits would land on a
+different worktree. Recon runs the check commands it finds before any gate; launch only on
+repos whose scripts you would run by hand. The front half (spec, plan, their reviews, the recorder) has been run against a
 stubbed runtime and in one small live run; its token-profile rows are still assumptions and
 are labelled so in the estimate.
 

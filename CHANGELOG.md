@@ -1,5 +1,53 @@
 # Changelog
 
+## v1.2.0 — 2026-09-11
+
+Every guarantee the skill claimed that the engine did not enforce, from an adversarial
+review of v1.1.1 by a different model; twenty findings, fifteen confirmed against the code
+and closed, five that were design choices the documents now state plainly.
+
+**The verdict is mechanical.** `ok` was `!review_missing && never_ran.length === 0`, so a
+run with a slice nobody implemented, a slice that failed verification, a reviewer who said
+`clean:true` over a list of findings or without reading the diff, scope the slicer admitted
+dropping, or edits still uncommitted at review time came back `ok:true`. Now `clean` is
+derived (diff read AND no findings; the reviewer's own word kept as `claimed_clean`),
+`verified:true` without `executed:true` is downgraded where the repo has checks, both
+judges report `git status --porcelain` and the first review's dirty paths count against
+the run (`uncommitted_at_review`), `plan.uncovered` counts against it, and `ok` is true
+only when `not_ok` — the list of reasons, in words — is empty.
+
+**The shared tree is guarded, not just asked nicely.** Implementers and patchers commit by
+pathspec (`git commit -- <files>`), which takes only the named paths whatever a sibling has
+staged in the shared index. A slice with no declared files, or a finding without a file,
+has an unknown footprint and runs with nothing else live, after the grouped ones.
+`src/**/*.py` now overlaps `src/a.py` (`**/` spans zero or more directories). Every file
+an implementer reports touching outside its slice is compared with what the other groups
+declared; a hit is a `footprint_violation`, shown to the adversary and held against the
+run. Findings may carry `files` (the test file included) so patchers sharing a helper are
+serialised. Within a patch group the verifier now completes before the next patcher
+starts; it used to run the checks while that patcher edited the same file.
+
+**The front half asks every question and stops where a gate was lost.** Two different
+questions with the same local id (the spec writer's Q1, the reviewer's Q1) collapsed to
+one; the second is now suffixed `-2`, and only a true duplicate is dropped. The plan
+writer can escalate `open_questions`, so a destructive sequencing choice pauses the run
+instead of landing as an engine decision. An answers author, a document reviewer, a
+fold-in author or the recorder that returned nothing used to be a log line while the build
+went on (with the owner's answer claimed as recorded); each is a stop now — `stage:'spec'`
+/ `'plan'`, `'spec-review'` / `'plan-review'`, `'record'` — and the resume replays from
+cache. The plan is measured once, after the last agent that writes into it (the recorder
+included), so slice pointers are current.
+
+**Smaller.** An explicit `testCmd` wins over Recon's `has_executable_checks:false`. A
+negative price override is ignored. Nested braces in a declared path are pinned by a test.
+
+**Stated, not changed.** One check command is the gate (the rest are `repo.other_checks`);
+verifiers run it on the tree after the implement phase, not checked out per commit; a patch
+reported fixed and signed off by its verifier is closed on those two agents' word unless
+the re-review re-raises it; the document reviewers are Opus attacking Opus, independent by
+agent, not by model; Recon runs the check commands it finds before any gate. 63 tests.
+
+
 ## v1.1.1 — 2026-09-11
 
 Two things the first live run of the front half taught. Recon's `today` is required with a

@@ -1,6 +1,6 @@
 ---
 name: verified-build
-description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Opus writes the spec, adversarially reviews it and folds the findings in, then writes the implementation plan, reviews and folds that in; then Sonnet writes the code in parallel waves of 15, Opus verifies every commit against the real diff and re-runs the repo's own checks, Opus adversarially reviews the combined diff, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
+description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Opus writes the spec, adversarially reviews it and folds the findings in, then writes the implementation plan, reviews and folds that in; then Sonnet writes the code in parallel waves of 15, Opus verifies every commit against the real diff and re-runs the repo's check command, Opus adversarially reviews the combined diff, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
 ---
 
 # /verified-build — spec it, plan it, write it cheap, verify it independently, then attack it
@@ -25,8 +25,10 @@ you merge — so the final spec and plan land on the trunk with the code. Before
 line of code, a recorder writes a **"## Decision record"** into both documents: one
 table of every decision behind the build — the spec writer's, the plan writer's, each
 fold-in's, and the owner's answers — numbered, with who took it and why, and resolves
-every "pending owner" marker. `documents.decision_record.commit_sha` is that commit; if
-it is null the record was not committed, and you say so. Each gets one
+every "pending owner" marker. `documents.decision_record.commit_sha` is that commit; a
+recorder that returns nothing stops the run (`stage:'record'`) before any code is built,
+as does a document reviewer or fold-in author that returns nothing (`stage:'spec-review'`
+/ `'plan-review'`) or an author who could not record the owner's answers. Each gets one
 adversarial review round (`docRounds`) by an Opus reviewer that must bring evidence —
 for a plan, that means opening every cited line range, compiling every code block and,
 where cheap, splicing a task into a scratch worktree — and one fold-in pass by an Opus
@@ -70,16 +72,28 @@ for anything else in the session on the strength of this skill.
 Slices that declare a common file are *serialised* — they run one after another,
 each in its own fresh agent, and each gets its own Opus verifier reading its own
 commits. File overlap costs wall-clock and nothing else. The engine never merges two
-slices into one context, and never widens what a single verifier has to read.
+slices into one context, and never widens what a single verifier has to read. A slice
+that declares **no** files has an unknown footprint, so it runs after the grouped slices
+with nothing else live; the same holds for a finding without a file in a patch round.
 
 **The tree is shared.** Every implementer, patcher and verifier works in this
 session's checkout — the runtime's worktree isolation would put each slice's commits
 on a different worktree, so the engine does not use it. Consequences you should know
-before you launch: implementers are told to stage by file name and never sweep; a
+before you launch: implementers and patchers commit **by pathspec** (`git add <file>`,
+then `git commit -- <file>…`), so a sibling's staged file never rides into their commit,
+and never sweep; a file an implementer touched outside its slice that another slice had
+declared comes back in `footprint_violations` and counts against the run; a
 check command that two agents run at once must tolerate that (a suite that writes to
 one dev database or one fixed temp path may fail spuriously — pass a `testCmd` that
 does not, or accept that a verifier may need a re-run); and a declared directory or
 glob collides with every path under it, so declare precisely or expect a serial run.
+
+**What "verified every commit" means here.** Each verifier reads its own slice's
+commits (`git show`, diff by diff) and runs the check command on the tree **as it stands
+after the whole implement phase**, not checked out at that commit — a shared tree cannot
+be rewound per slice. It also reports `git status --porcelain`: a check that passed on
+uncommitted edits proves nothing about the commits, and the adversary's dirty paths are
+held against the run (`uncommitted_at_review`).
 
 Two rules the planner now follows, because a serialised slice is not free (every one
 is a cold agent reading the repo and its spec): a chain longer than four is merged
@@ -172,7 +186,9 @@ only by the pair's own `check.sh`, never by a run.
 
 `testCmd` is now optional: Recon discovers it. Still pass it when you already know it
 from this session, or when the repo has several plausible commands and only one is the
-one that must pass — an explicit `testCmd` always wins over a discovered one.
+one that must pass — an explicit `testCmd` always wins over a discovered one, and over
+Recon's verdict that nothing is executable. Only one command is ever the gate; the
+others Recon found are `repo.other_checks`, run once by Recon and by nobody after.
 
 ## The call
 
@@ -205,7 +221,7 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `prices` | list prices cached 2026-06-24 | override `{sonnet, opus, fable}` × `{in, out, cache_read, cache_write}` USD per million tokens; merged per field, so `{sonnet:{in:3}}` changes one number |
 | `answers` | — | `[{id, answer}]` for the questions a paused run returned (ids look like `spec:Q1`); pass on the resume, keeping earlier answers; order does not matter |
 | `probeModels` | `true` | one trivial call per primary model before Recon; `ok:false, stage:'probe'` names a model this account cannot use. `false` skips it |
-| `testCmd` | discovered by Recon | exact command every lane runs; overrides discovery |
+| `testCmd` | discovered by Recon | exact command every lane runs; overrides discovery, and Recon's "nothing executable" |
 | `wave` | `15` | max agents live at once: parallel groups while implementing, parallel verifiers after (capped at 16, and by the runtime's own `min(16, cpus-2)`) |
 | `maxSlices` | `15` | max parallel slices the planner may cut (capped at 20) |
 | `maxRounds` | `1` | max review→patch→re-review rounds (capped at 4; `0` = review only, no patching). Was 2 until 2026-09-11 — see "Tuned from six runs" |
@@ -289,12 +305,25 @@ before the notification lands, say it is still running.
 
 First check `paused` — a paused run is handled by "When the run pauses with questions"
 or "The cost gate" above (`stage` says which), not reported as a result. Then check `ok`
-and `stage`:
+and `stage`.
+
+**`ok` is mechanical.** It is `true` only when the run completed and every gate passed:
+every slice implemented and verified, the adversary read the diff and found nothing,
+no scope left uncovered, no undeclared file touched inside another slice's footprint,
+nothing uncommitted at review time. Anything else is `ok:false` with **`not_ok`**, a
+list of the reasons in plain words — read it out. A verifier's `verified:true` without
+`executed:true` is downgraded by the engine where the repo has checks, and a reviewer's
+`clean:true` over a non-empty findings list (or without `diff_reviewed`) is treated as
+not clean (the reviewer's own word is kept as `claimed_clean`).
 
 - `stage:'probe'` — a pinned model is not usable from this session; nothing ran.
 - `stage:'recon'` — the run never started: report the reason (dirty tree, trunk, not a
   repo, git missing) and what to do about it, rather than describing it as a failed build.
-- `stage:'spec'` / `'plan'` — a document writer returned nothing after its fallback.
+- `stage:'spec'` / `'plan'` — a document writer returned nothing after its fallback, or
+  the author recording the owner's answers did (the document still says "pending owner").
+- `stage:'spec-review'` / `'plan-review'` — a document reviewer or fold-in author
+  returned nothing; the document is committed but that gate never ran. Relaunch.
+- `stage:'record'` — the recorder returned nothing; no code was built. Relaunch.
 - `stage:'implement'` / `'verify'` / `'review'` with an `error` naming the token budget —
   the turn's "+Nk" ceiling was nearly spent and the engine stopped between phases with a
   partial report rather than a wall of lost lanes; `lane_errors` and whatever ran are in it.
@@ -334,12 +363,18 @@ Otherwise the return value is structured. Report these, and in this order:
    gives the counts. This list is not a footnote and it is not the user's to-do — it
    is yours; see "Close the leftovers yourself" below. If `stopped_at_round_cap` is
    true the review-left findings were never patched at all.
-4. **`failed_verification`** — slices whose commits a verifier would not sign off.
-   **`not_implemented`** — slices whose implementer (and its fallback) returned
-   nothing; **`lane_errors`** — every lane that returned nothing or threw, with the
-   reason, primary and fallback alike. A run with lane errors and a clean verdict is a
-   run where something was judged by fewer eyes than designed; say which.
-5. **`plan.uncovered`** — scope the planner admitted dropping up front.
+4. **`failed_verification`** — slices whose commits a verifier would not sign off
+   (including a verifier that did not run the check). **`not_implemented`** — slices
+   whose implementer (and its fallback) returned nothing; **`lane_errors`** — every
+   lane that returned nothing or threw, with the reason, primary and fallback alike.
+   **`footprint_violations`** — files an implementer touched outside its slice that
+   another slice had declared: two agents may have been in that file at once, so read
+   those files yourself. **`uncommitted_at_review`** — what `git status` showed the
+   adversary; anything there is work outside the reviewed diff. A run with lane errors
+   and a clean verdict is a run where something was judged by fewer eyes than designed;
+   say which.
+5. **`plan.uncovered`** — scope the planner admitted dropping up front; it makes the
+   run `ok:false` because the task was not built in full.
    Also glance at **`plan.groups`** vs **`plan.largest_group`**: a `largest_group`
    equal to the slice count means every slice's declared files overlapped
    transitively, so the run was fully sequential. That is slow, not broken — every

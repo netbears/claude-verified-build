@@ -604,9 +604,12 @@ function parseAnswers(raw) {
 // PATCH_SEVERITY) or deferred (past the per-round cap); and every finding a round tried
 // to patch that did not come back closed — the patcher returned nothing, failed, or
 // disputed it, or the patch verifier would not sign it off. A later review that simply
-// did not mention one of those has not closed it; only a final-review finding whose
+// did not mention one of THOSE has not closed it; only a final-review finding whose
 // `re_raises` names it supersedes it (then the newer entry stands and the old one is
-// dropped). With no final review at all, nothing is treated as closed.
+// dropped). A patch reported fixed AND signed off by its verifier is closed on those
+// two agents' word — the re-review is told to re-raise it if it disagrees, and its
+// silence is taken as agreement; that is a deliberate trade, not an oversight. With
+// no final review at all, nothing is treated as closed.
 function collectForOrchestrator(openFindings, rounds, hasFinalReview) {
   const out = []
   const seen = new Set()
