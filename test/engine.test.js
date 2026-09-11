@@ -299,7 +299,7 @@ test('the implementer is told to stage by name and never sweep the shared tree',
   const { calls } = await run({ ...BASE_ARGS, approveEstimate: true })
   const impl = calls.find((c) => c.label === 'impl:s1').prompt
   assert.match(impl, /git add <file>/)
-  assert.match(impl, /never `git add -A`/)
+  assert.match(impl, /never `git add -A`/i)
 })
 
 // ---------------------------------------------------------------------------
@@ -368,4 +368,67 @@ test('a clean, complete run is ok with no reasons against it', async () => {
   const { out } = await run({ ...BASE_ARGS, approveEstimate: true })
   assert.equal(out.ok, true)
   assert.deepEqual(out.not_ok, [])
+})
+
+// ---------------------------------------------------------------------------
+// The shared tree: what the prompts must say, and what runs beside what.
+// ---------------------------------------------------------------------------
+test('implementers and patchers commit by pathspec, so a sibling\'s staged file is never swept into their commit', async () => {
+  const { calls } = await run({ ...BASE_ARGS, approveEstimate: true })
+  for (const label of ['impl:s1', 'patch:r0:F1']) {
+    const p = calls.find((c) => c.label === label).prompt
+    assert.match(p, /git commit -m "<message>" -- <file>/, label)
+    assert.match(p, /never `git add -A`/i, label)
+  }
+})
+
+// Tracks, per agent label, how many implement/patch agents were live when it started.
+function concurrencyTable(over) {
+  const live = new Set()
+  const liveAt = {}
+  const t = table(over)
+  const wrap = (key) => {
+    const base = t[key]
+    t[key] = async (label, prompt, opts) => {
+      liveAt[label] = [...live]
+      live.add(label)
+      await new Promise((r) => setImmediate(r))
+      live.delete(label)
+      return typeof base === 'function' ? base(label, prompt, opts) : base
+    }
+  }
+  wrap('impl:*'); wrap('patch:*'); wrap('verify:*')
+  return { t, liveAt }
+}
+
+test('a slice with no declared files runs with nothing else live, after the grouped slices', async () => {
+  const three = [{ id: 's0', title: 'z', prompt: 'do z', files: [], done_when: 'z' }, ...SLICES]
+  const { t, liveAt } = concurrencyTable({ slice: { shared_context: 'ctx', task_summary: 'brief', slices: three, uncovered: [] } })
+  const { labels } = await run({ ...BASE_ARGS, approveEstimate: true }, t)
+  assert.deepEqual(liveAt['impl:s0'], [], 's0 started with no other implementer live: ' + JSON.stringify(liveAt))
+  assert.ok(labels.indexOf('impl:s0') > labels.indexOf('impl:s2'), 'the exclusive slice runs after the grouped ones')
+  assert.ok(liveAt['impl:s2'].includes('impl:s1'), 'the disjoint slices still run beside each other')
+})
+
+test('a file touched outside the declared set that another group declared is a violation and a reason against the run', async () => {
+  const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, {
+    'impl:s1': { slice_results: [{ id: 's1', status: 'done', commit_sha: 'c1', files_touched: ['src/a.js', 'src/b.js'], checks_run: 'node --test', checks_passed: true, notes: 'had to' }] },
+  })
+  assert.deepEqual(out.footprint_violations, [{ slice: 's1', file: 'src/b.js', collides_with: ['s2'] }])
+  assert.equal(out.ok, false)
+  assert.ok(out.not_ok.some((r) => /undeclared/.test(r)), out.not_ok.join(' | '))
+})
+
+test('two findings that share a test file are patched one after the other, and a finding with no file runs alone', async () => {
+  const findings = [
+    { id: 'F1', severity: 'major', file: 'src/a.js', files: ['src/a.js', 'test/shared.test.js'], claim: 'one', failure_scenario: 'x' },
+    { id: 'F2', severity: 'major', file: 'src/b.js', files: ['src/b.js', 'test/shared.test.js'], claim: 'two', failure_scenario: 'x' },
+    { id: 'F3', severity: 'major', claim: 'three', failure_scenario: 'x' },
+    { id: 'F4', severity: 'major', file: 'src/d.js', claim: 'four', failure_scenario: 'x' },
+  ]
+  const { t, liveAt } = concurrencyTable({ 'adversary:r0': { clean: false, diff_reviewed: true, summary: 's', findings } })
+  await run({ ...BASE_ARGS, approveEstimate: true }, t)
+  assert.ok(!liveAt['patch:r0:F2'].includes('patch:r0:F1'), 'F2 waited for F1 (shared test file)')
+  assert.deepEqual(liveAt['patch:r0:F3'].filter((l) => l.startsWith('patch:')), [], 'F3 (no file) ran with no patcher live')
+  assert.ok(liveAt['patch:r0:F4'].includes('patch:r0:F1') || liveAt['patch:r0:F1'].includes('patch:r0:F4'), 'F4 ran beside the F1 group')
 })

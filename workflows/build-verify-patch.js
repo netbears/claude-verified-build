@@ -346,6 +346,7 @@ const REVIEW_SCHEMA = {
           id: { type: 'string' },
           severity: { type: 'string', enum: ['critical', 'major', 'minor'] },
           file: { type: 'string' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Every file a fix would touch, INCLUDING the test file the regression test goes in. Patchers are serialised by this; leaving it out lets two patchers edit one file at once.' },
           line: { type: 'integer' },
           claim: { type: 'string', description: 'One sentence: the defect.' },
           failure_scenario: { type: 'string', description: 'Concrete inputs/state -> wrong output or crash. "This is fragile" is not a finding.' },
@@ -428,8 +429,18 @@ function pathsOverlap(a, b) {
   if (a.startsWith(b + '/') || b.startsWith(a + '/')) return true
   const ga = a.includes('*'), gb = b.includes('*')
   if (!ga && !gb) return false
-  const globRe = (g) => new RegExp('^' + g.split('**').map((part) =>
-    part.split('*').map((lit) => lit.replace(/[.+^${}()|[\]\\?]/g, '\\$&')).join('[^/]*')).join('.*') + '(/.*)?$')
+  // `**/` spans zero or more directories (src/**/*.py covers src/a.py as well as
+  // src/deep/a.py), a bare `**` spans anything, `*` one segment.
+  const globRe = (g) => {
+    let re = ''
+    for (let i = 0; i < g.length; i++) {
+      if (g.startsWith('**/', i)) { re += '(?:.*/)?'; i += 2; continue }
+      if (g.startsWith('**', i)) { re += '.*'; i += 1; continue }
+      if (g[i] === '*') { re += '[^/]*'; continue }
+      re += g[i].replace(/[.+^${}()|[\]\\?]/, '\\$&')
+    }
+    return new RegExp('^' + re + '(/.*)?$')
+  }
   if (ga && !gb) return globRe(a).test(b)
   if (gb && !ga) return globRe(b).test(a)
   const pa = a.slice(0, a.indexOf('*')), pb = b.slice(0, b.indexOf('*'))
@@ -465,8 +476,9 @@ function declaredFiles(s) {
 // Slices that touch a common file cannot run concurrently. Union them into a
 // group; the group's slices run SEQUENTIALLY — one agent each, never merged
 // into one context — and groups run in parallel. A slice with no declared
-// files gets its own group and a warning, because an unknown footprint cannot
-// be proven disjoint. Within a group the slices keep the PLAN'S order: a slice
+// files gets its own group marked EXCLUSIVE, because an unknown footprint cannot
+// be proven disjoint from anything: the engine runs such a group with nothing
+// else live, after the grouped slices. Within a group the slices keep the PLAN'S order: a slice
 // that bridges two earlier groups used to be appended ahead of the second
 // group's slices, so Task 3 ran before the Task 2 it consumed from.
 function groupByFileConflict(slices) {
@@ -475,7 +487,7 @@ function groupByFileConflict(slices) {
     const files = declaredFiles(s)
     const entry = { slice: s, index }
     if (files.size === 0) {
-      log('WARNING: slice ' + s.id + ' declared no files — running it alone, footprint unknown')
+      log('WARNING: slice ' + s.id + ' declared no files — footprint unknown, so it runs with nothing else live')
       groups.push({ entries: [entry], files })
       return
     }
@@ -497,7 +509,53 @@ function groupByFileConflict(slices) {
   return groups
     .map((g) => ({ ...g, entries: g.entries.sort((a, b) => a.index - b.index) }))
     .sort((a, b) => a.entries[0].index - b.entries[0].index)
-    .map((g) => ({ slices: g.entries.map((e) => e.slice), files: g.files }))
+    .map((g) => ({ slices: g.entries.map((e) => e.slice), files: g.files, exclusive: g.files.size === 0 }))
+}
+
+// Groups run in waves of `size`; the exclusive ones (unknown footprint) run one at a
+// time afterwards, with nothing else live. Used by the implement and patch phases.
+async function runGroups(groups, size, fn, what) {
+  const shared = groups.filter((g) => !g.exclusive)
+  const exclusive = groups.filter((g) => g.exclusive)
+  const out = await wavesOne(shared, size, fn, what)
+  if (exclusive.length) {
+    log(what + ': ' + exclusive.length + ' group(s) with an unknown footprint run one at a time, nothing else live')
+    out.push(...await wavesOne(exclusive, 1, fn, what + ' (exclusive)'))
+  }
+  return out
+}
+
+// After the implement phase: every file an implementer reports touching that is outside
+// its declared set AND inside another group's declared set was edited while that group
+// may have been live in the same tree. That is the collision the grouping exists to
+// prevent, and no prompt can rule it out — so it is checked here and held against the run.
+function footprintViolations(built, groups) {
+  const out = []
+  const groupOf = (id) => groups.find((g) => g.slices.some((x) => x.id === id))
+  for (const b of built) {
+    if (!b || !b.impl) continue
+    const declared = [...declaredFiles(b.slice)]
+    const mine = groupOf(b.slice.id)
+    for (const r of b.impl.slice_results || []) {
+      for (const raw of r.files_touched || []) {
+        const f = normPath(raw)
+        if (!f || declared.some((d) => pathsOverlap(f, d))) continue
+        const collides = groups
+          .filter((g) => g !== mine && [...g.files].some((h) => pathsOverlap(f, h)))
+          .flatMap((g) => g.slices.map((x) => x.id))
+        if (collides.length) out.push({ slice: b.slice.id, file: f, collides_with: collides })
+      }
+    }
+  }
+  return out
+}
+
+// A finding's footprint for patch grouping: every file the reviewer says a fix would
+// touch (`files`, which should include the test file), else the single `file`, else
+// nothing — and nothing means an exclusive group.
+function patchFootprint(f) {
+  if (Array.isArray(f.files) && f.files.length) return f.files.map(String)
+  return f.file ? [String(f.file)] : []
 }
 
 function sliceBlock(s) {
@@ -1562,9 +1620,11 @@ function implPrompt(s, landedSiblings) {
       : '- There is nothing executable to run here, so do NOT claim you ran anything: leave checks_run empty and\n' +
       '  checks_passed false. Compensate by keeping the commit small and self-evident in the diff, since a\n' +
       '  reviewer reading it is the only gate this work will get.'),
-    '- Commit with a clear message. Stage ONLY the files you edited, by name (`git add <file>`): never `git add -A`,',
-    '  `git add .` or `git commit -a`. Other implementers are working in this same tree on other files at the same',
-    '  time, and a sweep would commit their half-written work under your name. If `git commit` fails on',
+    '- Commit with a clear message, and commit BY PATHSPEC: `git add <file>` for each file you edited, then',
+    '  `git commit -m "<message>" -- <file> <file>…` naming the same files. The index is shared with other',
+    '  implementers working in this tree at the same time; a plain `git commit` would carry whatever they have',
+    '  staged into your commit, and `git commit -- <files>` commits only the paths you name. Never `git add -A`,',
+    '  `git add .` or `git commit -a`: a sweep commits their half-written work under your name. If git fails on',
     '  `index.lock`, wait a moment and retry; do not delete the lock.',
     '- Do NOT push. Do NOT merge or rebase branches. Do NOT amend commits you did not make. Do NOT stash, reset or',
     '  check out anything: the tree is shared.',
@@ -1595,13 +1655,16 @@ async function implementGroup(group) {
   return landed
 }
 
-const built = (await wavesOne(groups, WAVE, implementGroup, 'implement wave')).filter(Boolean).flat()
+const built = (await runGroups(groups, WAVE, implementGroup, 'implement wave')).filter(Boolean).flat()
 // callAgent never throws, so a group can only go missing if the runtime dropped it;
 // name the slices rather than let the count quietly shrink.
 const neverRan = plan.slices.filter((s) => !built.some((b) => b.slice.id === s.id)).map((s) => s.id)
 const notImplemented = built.filter((b) => !b.impl).map((b) => b.slice.id)
 if (neverRan.length) log('WARNING: ' + neverRan.length + ' slice(s) never ran (the runtime dropped their group): ' + neverRan.join(', '))
 if (notImplemented.length) log('WARNING: ' + notImplemented.length + ' slice(s) had no implementer result after the fallback: ' + notImplemented.join(', '))
+const violations = footprintViolations(built, groups)
+if (violations.length) log('WARNING: ' + violations.length + ' undeclared file(s) touched inside another group\'s footprint: ' +
+  violations.map((v) => v.slice + ' -> ' + v.file + ' (declared by ' + v.collides_with.join(', ') + ')').join('; '))
 
 // ---------------------------------------------------------------------------
 // Phase 3 — Verify. Read-only, so there is no file contention and the grouping
@@ -1678,6 +1741,8 @@ function reviewPrompt(roundLabel, extra) {
     'THE SLICES THAT WERE EXECUTED:',
     JSON.stringify(plan.slices.map((s) => ({ id: s.id, title: s.title, done_when: s.done_when })), null, 2),
     (plan.uncovered && plan.uncovered.length ? '\nThe planner already admitted leaving out: ' + plan.uncovered.join(' | ') : ''),
+    (violations.length ? '\nIMPLEMENTERS THAT TOUCHED A FILE ANOTHER SLICE DECLARED (two agents may have edited it at once — read those files with suspicion):\n' +
+      violations.map((v) => '  ' + v.slice + ' touched ' + v.file + ', declared by ' + v.collides_with.join(', ')).join('\n') : ''),
     '',
     'PER-SLICE VERIFICATION RESULTS:',
     JSON.stringify(results.map((r) => ({ slice: r.slice.id, verify: r.verify })), null, 2),
@@ -1784,7 +1849,7 @@ while (
   // implement phase: findings that name the same file run one after another, groups
   // run in parallel, and every patch still gets its own verifier — those run as soon
   // as their patch lands, in parallel across the round.
-  const patchGroups = groupByFileConflict(take.map((f) => ({ id: f.id, files: f.file ? [f.file] : [], finding: f })))
+  const patchGroups = groupByFileConflict(take.map((f) => ({ id: f.id, files: patchFootprint(f), finding: f })))
   log('round ' + round + ': ' + take.length + ' patch(es) in ' + patchGroups.length + ' file-disjoint group(s)')
 
   function patchOne(f) {
@@ -1810,8 +1875,10 @@ while (
             '- ' + TEST_LINE + ' Run the whole thing, not just your new case.'
             : '- ' + TEST_LINE + ' So there is no regression test to add: explain in regression_test what would have\n' +
             '  caught this if the repo could run anything, and leave checks_passed false rather than implying a pass.'),
-          '- Stage and commit ONLY the files you edited, by name (`git add <file>`), never `git add -A`: other',
-          '  patchers may be working in this tree on other files. Commit with a message naming the finding id. Do NOT push.',
+          '- Commit BY PATHSPEC: `git add <file>` for each file you edited, then `git commit -m "<message>" -- <file> <file>…`',
+          '  naming the same files, with the finding id in the message. The index is shared with other patchers in this',
+          '  tree; `git commit -- <files>` commits only the paths you name. Never `git add -A`, `git add .` or',
+          '  `git commit -a`. Do NOT push.',
           '- If you believe the finding is WRONG, do not quietly skip it and do not "fix" it anyway: return',
           '  status "disputed" with the concrete evidence that refutes it. An unevidenced dispute will be',
           '  treated as a failure.',
@@ -1869,7 +1936,7 @@ while (
     return parallel(verifies.map((v) => () => v))
   }
 
-  const patched = (await wavesOne(patchGroups, WAVE, patchGroup, 'patch wave')).filter(Boolean).flat()
+  const patched = (await runGroups(patchGroups, WAVE, patchGroup, 'patch wave')).filter(Boolean).flat()
 
   const done = patched.filter(Boolean)
   rounds.push({ round: round, patched: done, deferred: deferred, handed_off: handedOff })
@@ -1956,6 +2023,7 @@ if (neverRan.length) notOk.push(neverRan.length + ' slice(s) never ran: ' + neve
 if (notImplemented.length) notOk.push(notImplemented.length + ' slice(s) not implemented (no implementer result): ' + notImplemented.join(', '))
 if (failedVerify.length) notOk.push(failedVerify.length + ' slice(s) failed verification: ' + failedVerify.map((r) => r.slice.id).join(', '))
 if (plan.uncovered && plan.uncovered.length) notOk.push('the slicer left scope uncovered: ' + plan.uncovered.join(' | '))
+if (violations.length) notOk.push(violations.length + ' undeclared file(s) touched inside another group\'s footprint: ' + violations.map((v) => v.slice + ' -> ' + v.file).join(', '))
 if (uncommittedAtReview) notOk.push('uncommitted changes in the tree at review time (not in the reviewed diff): ' + uncommittedAtReview.slice(0, 300))
 if (review && review.diff_reviewed !== true) notOk.push('the final review did not read the diff (diff_reviewed:false)')
 if (review && review.clean !== true) notOk.push('the final review is not clean: ' + openFindings.length + ' finding(s) open')
@@ -2006,6 +2074,9 @@ return {
   never_ran: neverRan,
   not_implemented: notImplemented,
   uncommitted_at_review: uncommittedAtReview,
+  // Files an implementer touched outside its slice that another group had declared:
+  // two agents may have been inside that file at once.
+  footprint_violations: violations,
   // Every lane that returned nothing or threw, primary or fallback, with the reason.
   lane_errors: laneErrors,
   patch_rounds: rounds,

@@ -7,6 +7,7 @@ const H = loadHelpers([
   'normPath', 'expandBraces', 'pathsOverlap', 'declaredFiles', 'groupByFileConflict',
   'severityRank', 'mergePrices', 'priceOf', 'lineCost', 'estimateRun',
   'namespaced', 'parseAnswers', 'collectForOrchestrator', 'looksLikePath',
+  'footprintViolations', 'patchFootprint',
 ], { consts: ['DEFAULT_PRICES', 'RECON_SCHEMA'] })
 
 test('recon must report today as a YYYY-MM-DD date: required, with a pattern the runtime enforces', () => {
@@ -159,4 +160,40 @@ test('severityRank ranks critical < major < minor and treats unknown as minor', 
   assert.ok(H.severityRank('critical') < H.severityRank('major'))
   assert.ok(H.severityRank('major') < H.severityRank('minor'))
   assert.equal(H.severityRank('weird'), H.severityRank('minor'))
+})
+
+test('a ** glob overlaps a file at zero depth as well as a nested one', () => {
+  assert.equal(H.pathsOverlap('src/**/*.py', 'src/a.py'), true)
+  assert.equal(H.pathsOverlap('src/**/*.py', 'src/deep/er/a.py'), true)
+  assert.equal(H.pathsOverlap('src/**', 'src/a.py'), true)
+  assert.equal(H.pathsOverlap('src/**/*.py', 'lib/a.py'), false)
+})
+
+test('nested braces expand to every leaf', () => {
+  assert.deepEqual([...new Set(H.expandBraces('src/{a,{b,c}}.py'))].sort(), ['src/a.py', 'src/b.py', 'src/c.py'])
+})
+
+test('a slice with no files is an exclusive group: it may not run beside anything', () => {
+  const g = H.groupByFileConflict([{ id: 's1', files: [] }, { id: 's2', files: ['a.py'] }])
+  assert.equal(g.length, 2)
+  assert.equal(g.find((x) => x.slices[0].id === 's1').exclusive, true)
+  assert.equal(g.find((x) => x.slices[0].id === 's2').exclusive, false)
+  assert.ok(H.logs.some((l) => l.includes('s1') && l.includes('no files')))
+})
+
+test('footprintViolations names a touched file that another group declared', () => {
+  const groups = H.groupByFileConflict([{ id: 's1', files: ['a.py'] }, { id: 's2', files: ['b.py'] }, { id: 's3', files: ['c.py'] }])
+  const built = [
+    { slice: { id: 's1', files: ['a.py'] }, impl: { slice_results: [{ id: 's1', status: 'done', files_touched: ['./a.py', 'b.py'], notes: '' }] } },
+    { slice: { id: 's2', files: ['b.py'] }, impl: { slice_results: [{ id: 's2', status: 'done', files_touched: ['b.py', 'docs/x.md'], notes: '' }] } },
+    { slice: { id: 's3', files: ['c.py'] }, impl: null },
+  ]
+  const v = H.footprintViolations(built, groups)
+  assert.deepEqual(v, [{ slice: 's1', file: 'b.py', collides_with: ['s2'] }])
+})
+
+test('patchFootprint takes every file a finding names, falling back to the single file', () => {
+  assert.deepEqual(H.patchFootprint({ id: 'F1', file: 'src/a.py' }), ['src/a.py'])
+  assert.deepEqual(H.patchFootprint({ id: 'F2', file: 'src/a.py', files: ['src/a.py', 'test/a.test.py'] }), ['src/a.py', 'test/a.test.py'])
+  assert.deepEqual(H.patchFootprint({ id: 'F3' }), [])
 })
