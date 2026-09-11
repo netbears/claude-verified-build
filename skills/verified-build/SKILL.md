@@ -72,6 +72,15 @@ each in its own fresh agent, and each gets its own Opus verifier reading its own
 commits. File overlap costs wall-clock and nothing else. The engine never merges two
 slices into one context, and never widens what a single verifier has to read.
 
+**The tree is shared.** Every implementer, patcher and verifier works in this
+session's checkout — the runtime's worktree isolation would put each slice's commits
+on a different worktree, so the engine does not use it. Consequences you should know
+before you launch: implementers are told to stage by file name and never sweep; a
+check command that two agents run at once must tolerate that (a suite that writes to
+one dev database or one fixed temp path may fail spuriously — pass a `testCmd` that
+does not, or accept that a verifier may need a re-run); and a declared directory or
+glob collides with every path under it, so declare precisely or expect a serial run.
+
 Two rules the planner now follows, because a serialised slice is not free (every one
 is a cold agent reading the repo and its spec): a chain longer than four is merged
 into fewer, larger slices, each still with its own agent and verifier; and when the
@@ -131,6 +140,19 @@ Those three are also free to check yourself: `git status --porcelain` and
 Glance before you launch; rely on Recon to catch what you missed, not to do the
 looking for you.
 
+**The engine also checks, for cents, that the models it pins are usable from this
+session.** Its first phase sends one tool-free call each to `sonnet` and `opus`. On an
+API-key (non-subscription) account a model alias can be disabled for the organisation,
+and on a subscription a plan may lack a tier; either used to surface fifteen agents deep
+as a wall of nulls. A result with `ok:false, stage:'probe'` names the model and says
+where to look (the console's model settings, or the key in `ANTHROPIC_API_KEY`); report
+that and stop. Nothing beyond the probes was spent. `probeModels:false` skips it.
+
+**Dependencies on the box:** `git` (every lane commits and diffs; Recon runs
+`git --version` and reports its absence as "not a git repository"), and whatever the
+repo's own check command needs (Recon runs it before reporting it). `node` is needed
+only by the pair's own `check.sh`, never by a run.
+
 **Two things it cannot do for you:**
 
 1. **Worktrees.** Read the repo's `CLAUDE.md` / `AGENTS.md` and check for
@@ -180,8 +202,9 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `pauseForOwner` | `true` | pause and return the owner questions a writer or reviewer escalated; `false` = the recommended option stands, no pause |
 | `approveEstimate` | `false` | pass `true` on the resume after the cost gate to start implementing |
 | `maxUsd` | — | a ceiling in USD at API list prices; the cost gate passes without pausing when the expected total is within it |
-| `prices` | list prices cached 2026-06-24 | override `{sonnet, opus, fable}` × `{in, out, cache_read, cache_write}` USD per million tokens |
-| `answers` | — | `[{id, answer}]` for the questions a paused run returned (ids look like `spec:Q1`); pass on the resume, keeping earlier answers |
+| `prices` | list prices cached 2026-06-24 | override `{sonnet, opus, fable}` × `{in, out, cache_read, cache_write}` USD per million tokens; merged per field, so `{sonnet:{in:3}}` changes one number |
+| `answers` | — | `[{id, answer}]` for the questions a paused run returned (ids look like `spec:Q1`); pass on the resume, keeping earlier answers; order does not matter |
+| `probeModels` | `true` | one trivial call per primary model before Recon; `ok:false, stage:'probe'` names a model this account cannot use. `false` skips it |
 | `testCmd` | discovered by Recon | exact command every lane runs; overrides discovery |
 | `wave` | `15` | max agents live at once: parallel groups while implementing, parallel verifiers after (capped at 16, and by the runtime's own `min(16, cpus-2)`) |
 | `maxSlices` | `15` | max parallel slices the planner may cut (capped at 20) |
@@ -236,7 +259,9 @@ a **non-subscription licence** would be billed. It carries `spent_so_far_usd` (t
 half, already run), `ahead_usd` with a low–high band (the spread the measured runs
 showed at that slice count), `total_expected_usd`,
 `of_which_from_unmeasured_assumptions_usd` (the front-half rows were assumed, not
-measured, when this was written), the price table, and a per-phase `breakdown`.
+measured, when this was written), the price table, and a per-phase `breakdown`. The
+low–high band is a fixed 0.6x–1.6x of the expected figure, the rough spread the six
+runs showed; it is not measured per slice count.
 
 Do this:
 
@@ -263,9 +288,22 @@ before the notification lands, say it is still running.
 ## Reading the result
 
 First check `paused` — a paused run is handled by "When the run pauses with questions"
-or "The cost gate" above (`stage` says which), not reported as a result. Then check `ok`. A run that returned `ok:false` with `stage:'recon'` never started —
-report the reason (dirty tree, trunk, not a repo) and what to do about it, rather than
-describing it as a failed build.
+or "The cost gate" above (`stage` says which), not reported as a result. Then check `ok`
+and `stage`:
+
+- `stage:'probe'` — a pinned model is not usable from this session; nothing ran.
+- `stage:'recon'` — the run never started: report the reason (dirty tree, trunk, not a
+  repo, git missing) and what to do about it, rather than describing it as a failed build.
+- `stage:'spec'` / `'plan'` — a document writer returned nothing after its fallback.
+- `stage:'implement'` / `'verify'` / `'review'` with an `error` naming the token budget —
+  the turn's "+Nk" ceiling was nearly spent and the engine stopped between phases with a
+  partial report rather than a wall of lost lanes; `lane_errors` and whatever ran are in it.
+- `stage:'review'` with `review_missing:true` — the work was implemented but **the
+  adversary returned nothing after its fallback, so it is unreviewed**. `for_orchestrator`
+  then carries every finding of the last round because nothing confirmed any of them
+  closed. Say "unreviewed" in the headline; a run like this is never clean.
+- `stage:'implement'` with `never_ran` non-empty — the runtime dropped those slices before
+  an implementer ran; they have no commits and no verifier.
 
 Otherwise the return value is structured. Report these, and in this order:
 
@@ -285,13 +323,22 @@ Otherwise the return value is structured. Report these, and in this order:
    and every verdict below rests on reading the diff. State that in the same breath
    as the headline, not as a footnote.
 3. **`for_orchestrator`** — the complete list of what is still unresolved, at
-   **every** severity: the last review's `open_findings` plus everything any round
-   handed off (below `patchSeverity`) or deferred (past the per-round cap), each
-   tagged with its `source`. `for_orchestrator_by_severity` gives the counts. This
-   list is not a footnote and it is not the user's to-do — it is yours; see
-   "Close the leftovers yourself" below. If `stopped_at_round_cap` is true the
-   review-left findings were never patched at all.
+   **every** severity: the last review's `open_findings`; everything any round
+   handed off (below `patchSeverity`) or deferred (past the per-round cap); and
+   every finding a round tried to patch that did not come back closed — the patcher
+   returned nothing, reported `failed`, disputed it, or the patch verifier would not
+   sign it off. Each carries its `source`; a dispute's source quotes the patcher's
+   evidence. Finding ids are namespaced by the review that raised them (`r0:F1` from
+   the first pass, `r1:F1` from the re-review), and a re-review finding whose
+   `re_raises` names an earlier id has replaced it. `for_orchestrator_by_severity`
+   gives the counts. This list is not a footnote and it is not the user's to-do — it
+   is yours; see "Close the leftovers yourself" below. If `stopped_at_round_cap` is
+   true the review-left findings were never patched at all.
 4. **`failed_verification`** — slices whose commits a verifier would not sign off.
+   **`not_implemented`** — slices whose implementer (and its fallback) returned
+   nothing; **`lane_errors`** — every lane that returned nothing or threw, with the
+   reason, primary and fallback alike. A run with lane errors and a clean verdict is a
+   run where something was judged by fewer eyes than designed; say which.
 5. **`plan.uncovered`** — scope the planner admitted dropping up front.
    Also glance at **`plan.groups`** vs **`plan.largest_group`**: a `largest_group`
    equal to the slice count means every slice's declared files overlapped
@@ -304,8 +351,10 @@ Otherwise the return value is structured. Report these, and in this order:
    sent to a patcher. They are still in `open_findings`; they are yours to fix by
    hand, and they are usually ten minutes each.
 7. **`patch_rounds[].patched[].patch.status === 'disputed'`** — the patcher argued
-   the finding was wrong. Surface the dispute and its evidence; do not quietly
-   treat it as fixed, and do not quietly treat it as broken either.
+   the finding was wrong. It is already in `for_orchestrator` with the evidence in
+   its `source`; judge it there. Do not quietly treat it as fixed, and do not quietly
+   treat it as broken either. A patch with `verify: null` had no verifier because
+   there was nothing to verify (the patcher returned nothing or reported `failed`).
 8. **`models.fallbacks.used`** — lanes whose primary model returned nothing and were
    re-run once on the fallback tier (`label`, `primary`, `fallback` per entry). Say
    which verdicts came from the fallback model: "verified by Fable because Opus was
@@ -406,7 +455,9 @@ about ninety minutes, every judge lane returned null, and the run reported `ok:t
 with zero verification. The cost is paid only when a primary fails and only for that
 lane; a Fable fallback bills ~2x Opus for it. `fallback:false` disables it,
 `judgeFallback` / `coderFallback` change the tiers. One caveat: an agent the user skips
-mid-run also returns nothing and gets the same single fallback attempt.
+mid-run also returns nothing and gets the same single fallback attempt. A lane that
+returns nothing after its fallback is recorded in `lane_errors`; if that lane was the
+adversary, the run comes back `ok:false` with `review_missing:true` rather than clean.
 
 Spend is **context size x number of calls** — cache reads are ~99% of real token
 consumption and output is <1%. So the only question that matters is *which model's
@@ -424,13 +475,16 @@ Opus. The judge lanes are low-volume and high-consequence, so they get Opus. Rec
 on Sonnet too: it is mechanical discovery, and it *saves* money by establishing facts
 once that every later agent would otherwise pay to rediscover.
 
-A real run is roughly **25-35 agents, ~15-25M tokens, on the order of $15-20 at list
-rates**. The same work done step-by-step in one premium-model session lands nearer
-$55-70 — not because it uses fewer tokens (it uses slightly more), but because a
-single long session's context grows quadratically and every re-read bills at the top
-rate. Right for a multi-file feature; badly wrong for a small fix. If the user seems
-not to have priced that in, say the number before you launch — once, then do as they
-ask.
+A real run, as measured over the six runs above, is **30-60 agents, hundreds of
+millions of cached-read tokens, and roughly $75-250 at list rates** for a plan of five
+to twelve tasks (the front half — spec, plan, their reviews — adds to that and was not
+yet measured when this was written; the cost gate labels those rows as assumptions).
+The same work done step-by-step in one premium-model session is not cheaper: a single
+long session's context grows quadratically and every re-read bills at the top rate,
+which is why the volume lanes sit on Sonnet. Right for a multi-file feature; badly
+wrong for a small fix. The cost gate shows the user the figure before a line of code is
+written; if they seem not to have priced it in earlier, say the number before you
+launch — once, then do as they ask.
 
 **`effort` is the expensive knob, not the model.** It scales output tokens, the
 priciest meter on every row above. `high` is the default and the sweet spot; reach

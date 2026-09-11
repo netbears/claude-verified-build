@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.1.0 — 2026-09-11
+
+Every gap an adversarial review of v1.0.0 found, closed; a test suite; a model probe.
+
+**Wrong outcomes fixed.** A slice that bridged two file groups ran before the earlier task
+it consumed from (`s1 > s3 > s2`); groups now keep the plan's order. A declared directory,
+glob or `..` path never collided with the files under it, so two agents could share a file;
+`pathsOverlap` now treats a directory as covering its contents and a glob as matching what
+it could match. A lane that threw inside `parallel()` silently dropped its whole group;
+`callAgent` never throws now, every failure lands in `lane_errors`, `not_implemented` and
+`never_ran` name the slices, and the token budget stops the run between phases with a
+report. An adversary that returned nothing after its fallback read as a clean run; it is
+`ok:false, review_missing:true` now, and with no final review every patched finding is
+carried. A finding whose patch failed, was disputed or was not signed off fell off the
+orchestrator's list unless the re-review re-raised it; `collectForOrchestrator` carries all
+of them, and a re-review marks a genuine re-raise with `re_raises`. Finding ids are
+namespaced by round (`r0:F1`), so a round-1 minor is no longer conflated with a new `F1`.
+
+**Cost gate fixed.** Fable's cache-read price was 0.25 (below Opus); it is 1.00, as the
+skill's table always said. A partial `prices` override replaced a whole row and turned every
+cost into `null`, which then passed any `maxUsd`; overrides merge per field and `maxUsd`
+passes only a finite total. The low–high band is described as what it is: a fixed 0.6x–1.6x.
+
+**Front half.** Answers are sorted by id, so a resume replays the answers author whatever
+order the orchestrator passed them in. Fold-in dispositions (folded, refuted with evidence)
+are on the decision record, as the skill claimed. The plan re-measure keeps the plan
+writer's decisions. A path-shaped `task` is handed to Recon, the slicer, the verifiers and
+the adversary as "read this document", not as a bare path.
+
+**New.** A Probe phase sends one tool-free call each to `sonnet` and `opus` before Recon
+and stops with `stage:'probe'` if this account cannot use one (`probeModels:false` skips).
+Implementers are told to stage by file name and never sweep the shared tree. A patcher that
+returned nothing or reported `failed` gets no verifier. The unused `waves()` is gone; the
+slicer sits under the Slice phase.
+
+**Repo.** `test/helpers.test.js` and `test/engine.test.js` (the whole engine against a
+stubbed runtime, 35 tests); `check.sh` runs them and works on BSD `mktemp`; `install.sh`
+checks git, node, ssh/scp and a checksum tool, runs `check.sh` before copying, no longer
+creates a literal `~` directory on remote hosts, and works with macOS `md5`; CI on both
+remotes; `.gitignore`. README gains "What a run executes, and where" and the known limits;
+the skill's cost paragraph now matches the measured figures instead of contradicting them.
+
+
 ## v1.0.0 — 2026-09-11
 
 The first tagged release. One skill, one engine, an installer, a checker.

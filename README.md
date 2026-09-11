@@ -17,7 +17,8 @@ Works on any git repo in any language: the first agent discovers from the repo i
 
 ```mermaid
 flowchart TD
-    I([idea · spec · plan]) --> R[Recon<br/><i>sonnet</i>: git state, ecosystem, the check command, today's date]
+    I([idea · spec · plan]) --> PB[Probe<br/>one tool-free call each to sonnet and opus: usable from this account?]
+    PB --> R[Recon<br/><i>sonnet</i>: git state, ecosystem, the check command, today's date]
     R --> S[Spec<br/><i>opus</i>: brainstorming doctrine → docs/specs/…md, committed]
     S --> SR[Spec review<br/><i>opus</i> attacks with evidence → <i>opus</i> folds in or refutes]
     SR --> Q1{owner<br/>questions?}
@@ -46,6 +47,7 @@ flowchart TD
 
 | Stage | Model | What it produces | Gate |
 |---|---|---|---|
+| Probe | both | one trivial answer per pinned model | a model this account cannot use → stop, for cents |
 | Recon | Sonnet | git state, ecosystem, the one check command, today's date, the docs convention | not a repo, dirty tree or the trunk → stop |
 | Spec | Opus | `docs/specs/YYYY-MM-DD-<slug>.md`, committed; small decisions recorded, big ones escalated | |
 | Spec review + fold-in | Opus + Opus | findings with evidence; each folded in or refuted with evidence | unanswered owner questions → **pause** |
@@ -61,6 +63,14 @@ flowchart TD
 | Re-review | Opus | closed? and did the patches introduce anything? | |
 | Orchestrator | you | closes every leftover at every severity by hand, then reports | |
 
+Nothing is lost quietly. A lane that returns nothing or throws — primary and fallback
+alike — is recorded in `lane_errors`; a slice with no implementer result is named in
+`not_implemented`; an adversary that never returned makes the run `ok:false` with
+`review_missing:true` rather than clean; and a finding whose patch failed, was disputed
+or was not signed off stays on the orchestrator's list until a re-review explicitly
+re-raises it. The turn's token budget, where one is set, stops the run between phases
+with a partial report.
+
 Three pauses, all of the same shape: the run returns early with `paused:true`, the
 orchestrator asks the user, and the same run resumes with the answer. No prompt before a
 pause mentions the answer, so every earlier agent replays from cache.
@@ -70,10 +80,15 @@ pause mentions the answer, so every earlier agent replays from cache.
 ```
 skills/verified-build/SKILL.md     the entry point: pre-flight, the arguments, the pauses, how to read a result
 workflows/build-verify-patch.js    the engine: one deterministic Workflow script, plain JS, no dependencies
-install.sh                         copies the pair into one or more Claude config dirs (local or user@host:dir)
-check.sh                           node --check for the engine
-CHANGELOG.md                        what changed, by version
+install.sh                         checks the tools, runs check.sh, copies the pair into Claude config dirs (local or user@host:dir)
+check.sh                           syntax check of the engine, then the tests
+test/helpers.test.js               the pure helpers (path overlap, grouping, prices, the orchestrator's list) in isolation
+test/engine.test.js                the whole engine run against a stubbed runtime: every pause, gate and failure path
+CHANGELOG.md                       what changed, by version
 ```
+
+CI runs `./check.sh` on every push (`.gitlab-ci.yml`, and `.github/workflows/check.yml`
+on the mirror).
 
 The two files are a pair and travel together. The names differ on purpose: an
 identically-named workflow would shadow the skill in the registry and skip its pre-flight.
@@ -86,9 +101,16 @@ identically-named workflow would shadow the skill in the registry and skip its p
 ./install.sh cloud:~/.claude-stonks             # a remote box, via scp
 ```
 
-Then `/reload-skills` in a running session, or restart a resident session on a server.
-Every copy should be byte-identical; `install.sh` prints the checksums so you can see it.
-Nothing else is required: no plugin, no package. Node is needed only for `check.sh`.
+Then restart the Claude Code session that will use it (skills are read at session start;
+a resident session on a server is restarted the same way). Every copy should be
+byte-identical; `install.sh` prints the checksums so you can see it.
+
+**What a box needs.** `git` — every lane of a run commits and diffs. `ssh` and `scp` for a
+remote install target. `node` (18 or later) only for `check.sh`, which `install.sh` runs
+before copying anything so a broken engine is never installed (`--no-check` skips it on a
+box without node). No plugin, no package. On an API-key account, the models the engine
+pins — `sonnet` and `opus` — must be enabled for the organisation; the engine's first phase
+probes both for cents and stops with `stage:'probe'` if one is not.
 
 ## Use
 
@@ -110,6 +132,24 @@ and the source of most patch-introduced defects; that is why the defaults are on
 critical and major findings only, and the leftovers closed by hand. The full record is in
 `SKILL.md` under "Tuned from six runs", and the cost gate's profile is the engine's
 `PROFILE` table.
+
+## What a run executes, and where
+
+Every agent works in **the session's checkout**, on the branch checked out there, with the
+tools the session has. Recon runs every check command it finds in the repo — CI config,
+Makefile, package scripts — before reporting it, so launching on a freshly cloned repo runs
+that repo's own scripts on your machine, as any test runner would. The repo's `CLAUDE.md`
+and `AGENTS.md` are quoted into every prompt as binding conventions. Launch only on repos
+whose scripts and instructions you would run by hand.
+
+**Known limits.** The tree is shared: implementers in different groups and up to `wave`
+verifiers run at once in one checkout. Implementers stage by file name and never sweep, but
+a check command that cannot tolerate two concurrent runs (one dev database, one fixed temp
+path) can fail spuriously; pass a `testCmd` that can, or expect a re-run. The runtime's
+worktree isolation is not used because each slice's commits would land on a different
+worktree. The front half (spec, plan, their reviews, the recorder) has been run against a
+stubbed runtime and in one small live run; its token-profile rows are still assumptions and
+are labelled so in the estimate.
 
 ## Doctrine
 
