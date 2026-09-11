@@ -207,7 +207,7 @@ const DISCOVERY_HINTS = [
 const RECON_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['is_git_repo', 'head_sha', 'branch', 'is_trunk', 'dirty', 'ecosystem', 'verify_commands', 'has_executable_checks'],
+  required: ['is_git_repo', 'head_sha', 'branch', 'is_trunk', 'dirty', 'ecosystem', 'verify_commands', 'has_executable_checks', 'today'],
   properties: {
     is_git_repo: { type: 'boolean', description: 'True only if `git rev-parse --is-inside-work-tree` succeeded.' },
     head_sha: { type: 'string', description: 'Full sha from `git rev-parse HEAD`, or empty if there are no commits yet.' },
@@ -238,7 +238,10 @@ const RECON_SCHEMA = {
     has_executable_checks: { type: 'boolean', description: 'True if at least one verify_command actually ran. This decides whether verification can execute or only read.' },
     layout_notes: { type: 'string', description: 'Where source, tests and config live; anything this repo does unusually that an implementer would otherwise trip over.' },
     conventions: { type: 'string', description: 'Stated conventions from CLAUDE.md / AGENTS.md / CONTRIBUTING.md worth passing on verbatim, including any worktree or commit-trailer rules.' },
-    today: { type: 'string', description: 'Today\'s date as `date -I` prints it (YYYY-MM-DD). The engine cannot read a clock; documents are named with this.' },
+    // Required, with a pattern: the first live run of the front half had Recon omit it
+    // (it was optional), the engine fell back to 'undated', and the plan writer named
+    // its file `docs/plans/undated-<slug>.md`. The runtime retries a schema mismatch.
+    today: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$', description: 'Today\'s date exactly as `date -I` prints it (YYYY-MM-DD). Run the command; do not guess. The engine cannot read a clock; documents are named with this.' },
     docs_layout: { type: 'string', description: 'Where this repo keeps specs and plans if it has a convention (e.g. "specs: docs/specs, plans: docs/plans, named YYYY-MM-DD-<slug>.md"), and how the last few were named; empty if it has none.' },
   },
 }
@@ -924,6 +927,7 @@ if (Array.isArray(recon.verify_commands) && recon.verify_commands.length > 1) {
 // refuted. One review round per document by default (docRounds).
 // ---------------------------------------------------------------------------
 const TODAY = /^\d{4}-\d{2}-\d{2}$/.test(String(recon.today || '')) ? String(recon.today) : 'undated'
+if (TODAY === 'undated') log('WARNING: recon did not report today\'s date; documents will be named undated-<slug>.md — rename them before merging')
 const DOCS_LAYOUT = String(recon.docs_layout || '').trim()
 const SPEC_DIR = SPEC_DIR_IN || (/(docs\/[\w./-]*specs)/.exec(DOCS_LAYOUT) || [null, 'docs/specs'])[1]
 const PLANS_DIR = PLANS_DIR_IN || (/(docs\/[\w./-]*plans)/.exec(DOCS_LAYOUT) || [null, 'docs/plans'])[1]

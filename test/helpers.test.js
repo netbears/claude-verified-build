@@ -7,7 +7,14 @@ const H = loadHelpers([
   'normPath', 'expandBraces', 'pathsOverlap', 'declaredFiles', 'groupByFileConflict',
   'severityRank', 'mergePrices', 'priceOf', 'lineCost', 'estimateRun',
   'namespaced', 'parseAnswers', 'collectForOrchestrator', 'looksLikePath',
-], { consts: ['DEFAULT_PRICES'] })
+], { consts: ['DEFAULT_PRICES', 'RECON_SCHEMA'] })
+
+test('recon must report today as a YYYY-MM-DD date: required, with a pattern the runtime enforces', () => {
+  assert.ok(H.RECON_SCHEMA.required.includes('today'))
+  const re = new RegExp(H.RECON_SCHEMA.properties.today.pattern)
+  assert.ok(re.test('2026-09-11'))
+  assert.ok(!re.test('11 Sep 2026') && !re.test(''))
+})
 
 const ids = (groups) => groups.map((g) => g.slices.map((s) => s.id).join('>'))
 
