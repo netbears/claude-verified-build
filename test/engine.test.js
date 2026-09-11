@@ -38,6 +38,11 @@ function table(over) {
       decisions: [{ question: 'order', decision: 'a first', why: 'b consumes a' }] },
     'plan-review:r1': { status: 'approved', findings: [], summary: 'fine' },
     'decision-record': { folded: [], refuted: [], commit_sha: 'd1', summary: 'recorded' },
+    // The recorder commits into the plan, so the plan is re-measured on every run that has one.
+    'plan-index': { path: 'docs/plans/2026-09-11-x.md', title: 'x', commit_sha: 'd1', global_constraints_lines: '5-9',
+      tasks: [{ n: 1, title: 'a', files: ['src/a.js'], lines: '10-40' }, { n: 2, title: 'b', files: ['src/b.js'], lines: '41-80' }] },
+    'spec-answers': { folded: [], refuted: [], commit_sha: 'a1', summary: 'answers recorded' },
+    'plan-answers': { folded: [], refuted: [], commit_sha: 'a2', summary: 'answers recorded' },
     slice: { shared_context: 'ctx', task_summary: 'brief', slices: SLICES, uncovered: [] },
     'impl:*': (label) => ({ slice_results: [{ id: label.split(':')[1], status: 'done', commit_sha: 'c1', files_touched: [], checks_run: 'node --test', checks_passed: true, notes: '' }] }),
     'verify:*': { verified: true, executed: true, commands_run: 'node --test', output_tail: 'ok', checks_available: true, problems: [], summary: 'ok' },
@@ -87,7 +92,6 @@ test('first launch: probes, recon, the documents, the slicer, then pauses at the
   assert.deepEqual(labels.slice(0, 3).sort(), ['probe:opus', 'probe:sonnet', 'recon'])
   assert.ok(labels.includes('spec') && labels.includes('spec-review:r1') && labels.includes('spec-fold:r1'))
   assert.ok(labels.includes('plan-doc') && labels.includes('plan-review:r1') && labels.includes('decision-record'))
-  assert.ok(!labels.includes('plan-index'), 'an approved plan is not re-measured')
   assert.equal(labels[labels.length - 1], 'slice')
   assert.ok(!labels.some((l) => l.startsWith('impl:')), 'nothing implemented before approval')
 })
@@ -431,4 +435,88 @@ test('two findings that share a test file are patched one after the other, and a
   assert.ok(!liveAt['patch:r0:F2'].includes('patch:r0:F1'), 'F2 waited for F1 (shared test file)')
   assert.deepEqual(liveAt['patch:r0:F3'].filter((l) => l.startsWith('patch:')), [], 'F3 (no file) ran with no patcher live')
   assert.ok(liveAt['patch:r0:F4'].includes('patch:r0:F1') || liveAt['patch:r0:F1'].includes('patch:r0:F4'), 'F4 ran beside the F1 group')
+})
+
+// ---------------------------------------------------------------------------
+// The front half: questions are never dropped, and a lost document lane stops the run.
+// ---------------------------------------------------------------------------
+test('a spec writer\'s Q1 and a reviewer\'s Q1 are both asked', async () => {
+  const q = (question) => ({ id: 'Q1', question, options: [{ label: 'a', consequence: 'c' }, { label: 'b', consequence: 'd' }], recommended: 'a', why: 'w' })
+  const { out } = await run(BASE_ARGS, {
+    spec: { ...table().spec, open_questions: [q('Delete old rows?')] },
+    'spec-review:r1': { status: 'approved', findings: [], summary: 'fine', questions_for_owner: [q('Charge the card?')] },
+  })
+  assert.equal(out.paused, true)
+  assert.deepEqual(out.questions.map((x) => x.question), ['Delete old rows?', 'Charge the card?'])
+})
+
+test('the plan writer can escalate an owner question, and the run pauses at the plan stage', async () => {
+  const { out, calls } = await run(BASE_ARGS, {
+    'plan-doc': { ...table()['plan-doc'], open_questions: [{ id: 'Q1', question: 'Drop the column now or in a later migration?', options: [
+      { label: 'now', consequence: 'data gone' }, { label: 'later', consequence: 'kept' }], recommended: 'later', why: 'reversible' }] },
+  })
+  assert.equal(out.paused, true)
+  assert.equal(out.stage, 'plan')
+  assert.deepEqual(out.questions.map((q) => q.id), ['plan:Q1'])
+  assert.match(calls.find((c) => c.label === 'plan-doc').prompt, /open_questions/)
+})
+
+test('an answers author that returns nothing stops the run: the owner\'s decision is not claimed as recorded', async () => {
+  const withQ = { spec: { ...table().spec, open_questions: [{ id: 'Q1', question: 'Delete old rows?', options: [
+    { label: 'yes', consequence: 'data gone' }, { label: 'no', consequence: 'kept' }], recommended: 'no', why: 'reversible' }] }, 'spec-answers': null }
+  const { out, labels } = await run({ ...BASE_ARGS, answers: [{ id: 'spec:Q1', answer: 'yes' }] }, withQ)
+  assert.equal(out.ok, false)
+  assert.equal(out.stage, 'spec')
+  assert.match(out.error, /answer/)
+  assert.ok(!labels.includes('plan-doc'))
+  assert.ok(!out.documents.decisions.some((d) => d.why === "the owner's answer"))
+})
+
+test('a document reviewer or fold-in that returns nothing stops the run before anything is sliced', async () => {
+  const a = await run(BASE_ARGS, { 'spec-review:r1': null })
+  assert.equal(a.out.ok, false); assert.equal(a.out.stage, 'spec-review'); assert.ok(!a.labels.includes('slice'))
+  const b = await run(BASE_ARGS, { 'spec-fold:r1': null })
+  assert.equal(b.out.ok, false); assert.equal(b.out.stage, 'spec-review'); assert.ok(!b.labels.includes('plan-doc'))
+  const c = await run(BASE_ARGS, { 'plan-review:r1': null })
+  assert.equal(c.out.ok, false); assert.equal(c.out.stage, 'plan-review'); assert.ok(!c.labels.includes('slice'))
+})
+
+test('a recorder that returns nothing stops the run: no code is built on an uncommitted decision record', async () => {
+  const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true }, { 'decision-record': null })
+  assert.equal(out.ok, false)
+  assert.equal(out.stage, 'record')
+  assert.ok(!labels.includes('slice'))
+  assert.equal(out.documents.decision_record.commit_sha, null)
+})
+
+test('the plan is re-measured after the recorder commits into it, so slice pointers are current', async () => {
+  const { labels, out } = await run(BASE_ARGS, {
+    'plan-index': { path: 'docs/plans/2026-09-11-x.md', title: 'x', commit_sha: 'd1', global_constraints_lines: '5-9',
+      tasks: [{ n: 1, title: 'a', files: ['src/a.js'], lines: '10-40' }, { n: 2, title: 'b', files: ['src/b.js'], lines: '41-80' }] },
+  })
+  assert.ok(labels.indexOf('plan-index') > labels.indexOf('decision-record'), 'measured after the recorder: ' + labels.join(','))
+  assert.equal(labels.filter((l) => l === 'plan-index').length, 1, 'one measurement per run, after every commit into the plan')
+  assert.equal(out.documents.plan.commit_sha, 'd1')
+  assert.equal(out.documents.plan.decisions.length, 1)
+})
+
+// ---------------------------------------------------------------------------
+// The check command, and the patch round's own ordering.
+// ---------------------------------------------------------------------------
+test('an explicit testCmd wins even when recon found nothing executable', async () => {
+  const { out, calls } = await run({ ...BASE_ARGS, approveEstimate: true, testCmd: 'make check' },
+    { recon: { ...RECON, verify_commands: [], primary_check_cmd: '', has_executable_checks: false } })
+  assert.equal(out.repo.executable_checks, true)
+  assert.equal(out.repo.check_command, 'make check')
+  assert.match(calls.find((c) => c.label === 'verify:s1').prompt, /Run the check YOURSELF/)
+})
+
+test('within a patch group the verifier finishes before the next patcher starts', async () => {
+  const findings = [
+    { id: 'F1', severity: 'major', file: 'src/a.js', claim: 'one', failure_scenario: 'x' },
+    { id: 'F2', severity: 'major', file: 'src/a.js', claim: 'two', failure_scenario: 'x' },
+  ]
+  const { t, liveAt } = concurrencyTable({ 'adversary:r0': { clean: false, diff_reviewed: true, summary: 's', findings } })
+  await run({ ...BASE_ARGS, approveEstimate: true }, t)
+  assert.ok(!liveAt['patch:r0:F2'].includes('verify:r0:F1'), 'F2 started while F1\'s verifier was still running checks on the same file')
 })

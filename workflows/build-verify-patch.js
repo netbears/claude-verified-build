@@ -582,7 +582,7 @@ function mergePrices(defaults, override) {
     const row = override && typeof override === 'object' && override[model] && typeof override[model] === 'object' ? override[model] : null
     if (!row) continue
     for (const k of Object.keys(defaults[model])) {
-      if (Number.isFinite(row[k])) out[model][k] = row[k]
+      if (Number.isFinite(row[k]) && row[k] >= 0) out[model][k] = row[k]
     }
   }
   return out
@@ -796,6 +796,7 @@ const PLANDOC_SCHEMA = {
       },
     },
     global_constraints_lines: { type: 'string', description: 'Line range of the "## Global Constraints" section, e.g. "25-39".' },
+    open_questions: QUESTION_ITEMS,
     decisions: {
       type: 'array',
       description: 'Every decision the PLAN took that the spec left open or that narrows/sequences the spec (a declared narrowing, a migration number, an ordering, a file boundary). Empty only if the plan took none.',
@@ -988,7 +989,9 @@ if (recon.is_trunk === true && !ALLOW_TRUNK) {
 
 const BASE = String(recon.head_sha).trim()
 const CHECK_CMD = TEST_CMD || String(recon.primary_check_cmd || '').trim()
-const HAS_CHECKS = Boolean(CHECK_CMD) && recon.has_executable_checks !== false
+// An explicit testCmd always wins, including over Recon's has_executable_checks:false —
+// the caller said it runs, and the verifiers will find out if it does not.
+const HAS_CHECKS = TEST_CMD ? true : Boolean(CHECK_CMD) && recon.has_executable_checks !== false
 
 const TEST_LINE = CHECK_CMD
   ? 'The command that proves this repo still works is: ' + CHECK_CMD +
@@ -1036,14 +1039,20 @@ function looksLikePath(t) {
 // Questions are namespaced by stage ("spec:Q1") so an answer given for the spec's
 // pause is never mistaken for a plan question of the same local id, and so the
 // apply-answers prompt for the spec stays byte-identical across a later resume.
+// Two DIFFERENT questions (or findings) that arrive with the same local id — the spec
+// writer's Q1 and the reviewer's Q1 — are both kept; the second is suffixed "-2". Only
+// an item whose id AND text repeat is a duplicate and dropped.
 function namespaced(stage, qs) {
-  const seen = new Set()
+  const seen = new Map()
   const out = []
   for (const q of qs || []) {
     if (!q || !q.id) continue
-    const id = stage + ':' + String(q.id).replace(/^\w+:/, '')
+    const base = stage + ':' + String(q.id).replace(/^\w+:/, '')
+    const text = String(q.question || q.claim || '')
+    let id = base
+    for (let n = 2; seen.has(id) && seen.get(id) !== text; n++) id = base + '-' + n
     if (seen.has(id)) continue
-    seen.add(id)
+    seen.set(id, text)
     out.push({ ...q, id })
   }
   return out
@@ -1107,10 +1116,31 @@ async function applyAnswers(stage, docPath, questions) {
     ].join('\n'),
     { label: stage + '-answers', phase: stage === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: FOLD_SCHEMA }
   )
+  // The owner's answer goes on the record only once an author has written it into the
+  // document; an author that returned nothing leaves "pending owner" in the text, and
+  // claiming the decision recorded would be the lie the record exists to prevent.
+  if (!applied) return false
   documents.decisions.push(...given.map((a) => ({
     stage: stage, question: (byId[a.id] || {}).question || a.id, decision: a.answer, why: 'the owner\'s answer',
   })))
   return applied
+}
+
+function answersLost(stage, docPath) {
+  return { ok: false, stage: stage, error: 'the author recording the owner\'s answers in the ' + stage + ' returned nothing after its fallback; ' +
+    docPath + ' still carries the provisional decisions marked "pending owner". Relaunch with the same answers.',
+    recon, documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null }, lane_errors: laneErrors }
+}
+
+// A document review round whose reviewer or fold-in author returned nothing is a gate
+// that never ran. The build must not proceed on a document nobody attacked (or on
+// findings nobody folded in), so the run stops here; a relaunch replays what ran.
+function docLaneLost(kind, rounds) {
+  const lost = rounds.find((r) => r.lost)
+  if (!lost) return null
+  return { ok: false, stage: kind + '-review', error: 'the ' + kind + ' ' + lost.lost + ' of round ' + lost.round + ' returned nothing after its fallback; ' +
+    'the ' + kind + ' is committed but ' + (lost.lost === 'reviewer' ? 'unreviewed' : 'its review is not folded in') + '. Nothing was sliced or implemented. Relaunch to retry.',
+    recon, documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null }, lane_errors: laneErrors }
 }
 
 async function reviewAndFold(kind, docPath, extra) {
@@ -1179,7 +1209,7 @@ async function reviewAndFold(kind, docPath, extra) {
       ].join('\n'),
       { label: kind + '-review:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: DOC_REVIEW_SCHEMA }
     )
-    if (!review) { out.push({ round: r, review: null, fold: null }); break }
+    if (!review) { out.push({ round: r, review: null, fold: null, lost: 'reviewer' }); break }
     log(kind + ' review round ' + r + ': ' + review.status + ', ' + review.findings.length + ' finding(s)')
     if (review.status === 'approved' || review.findings.length === 0) { out.push({ round: r, review, fold: null }); break }
 
@@ -1208,7 +1238,7 @@ async function reviewAndFold(kind, docPath, extra) {
       ].join('\n'),
       { label: kind + '-fold:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: FOLD_SCHEMA }
     )
-    out.push({ round: r, review, fold })
+    out.push({ round: r, review, fold, ...(fold ? {} : { lost: 'fold-in author' }) })
     if (!fold) break
     log(kind + ' fold-in round ' + r + ': ' + fold.folded.length + ' folded, ' + fold.refuted.length + ' refuted')
     // A fold-in is a decision too: the author changed the document on a reviewer's word,
@@ -1269,6 +1299,8 @@ if (FROM === 'idea') {
   documents.decisions.push(...(spec.decisions || []).map((d) => ({ stage: 'spec', ...d })))
   log('spec: ' + spec.path + ' (' + spec.classification + ', ' + (spec.decisions || []).length + ' decision(s) taken without the owner)')
   documents.spec_reviews = await reviewAndFold('spec', SPEC_PATH, 'THE IDEA IT CAME FROM:\n' + TASK)
+  const specLost = docLaneLost('spec', documents.spec_reviews)
+  if (specLost) return specLost
   const specQuestions = namespaced('spec', [
     ...(spec.open_questions || []),
     ...documents.spec_reviews.flatMap((r) => (r.review && r.review.questions_for_owner) || []),
@@ -1276,6 +1308,7 @@ if (FROM === 'idea') {
   const pause = ownerGate('spec', specQuestions, SPEC_PATH)
   if (pause) return pause
   const applied = await applyAnswers('spec', SPEC_PATH, specQuestions)
+  if (applied === false) return answersLost('spec', SPEC_PATH)
   if (applied) log('spec: owner answers recorded (' + (applied.commit_sha || 'no commit') + ')')
 }
 
@@ -1320,6 +1353,12 @@ if (FROM === 'idea' || FROM === 'spec') {
       '  declared narrowing, a migration number, an ordering, a file boundary — and write the same list into',
       '  the plan under a "## Decisions taken by the plan" heading. A narrowing hidden in a task body is the',
       '  kind of decision an owner discovers only after the build.',
+      '- QUESTIONS FOR THE OWNER: a sequencing or scoping choice that affects money, risk, data, ownership,',
+      '  reverses something that exists, or is one careful colleagues would make differently (a destructive',
+      '  migration step, an ordering that deletes before it copies) is NOT yours to take silently: put it in',
+      '  `open_questions` with two to four options, the consequence of each, and your recommendation; write the',
+      '  recommended option into the plan as the provisional decision, marked "pending owner". The run pauses',
+      '  and asks. Everything below that bar, decide and record.',
     ].join('\n'),
     { label: 'plan-doc', phase: 'Plan', model: JUDGE, effort: EFFORT, schema: PLANDOC_SCHEMA }
   )
@@ -1329,25 +1368,18 @@ if (FROM === 'idea' || FROM === 'spec') {
   documents.decisions.push(...(planDoc.decisions || []).map((d) => ({ stage: 'plan', ...d })))
   log('plan: ' + planDoc.path + ' (' + planDoc.tasks.length + ' task(s), ' + (planDoc.decisions || []).length + ' decision(s))')
   documents.plan_reviews = await reviewAndFold('plan', PLAN_PATH, (SPEC_PATH ? 'THE SPEC IT IMPLEMENTS: ' + SPEC_PATH : 'THE REQUIREMENTS:\n' + TASK))
-  const planQuestions = namespaced('plan', documents.plan_reviews.flatMap((r) => (r.review && r.review.questions_for_owner) || []))
+  const planLost = docLaneLost('plan', documents.plan_reviews)
+  if (planLost) return planLost
+  const planQuestions = namespaced('plan', [
+    ...(planDoc.open_questions || []),
+    ...documents.plan_reviews.flatMap((r) => (r.review && r.review.questions_for_owner) || []),
+  ])
   const pausePlan = ownerGate('plan', planQuestions, PLAN_PATH)
   if (pausePlan) return pausePlan
   const appliedPlan = await applyAnswers('plan', PLAN_PATH, planQuestions)
+  if (appliedPlan === false) return answersLost('plan', PLAN_PATH)
   if (appliedPlan) log('plan: owner answers recorded (' + (appliedPlan.commit_sha || 'no commit') + ')')
-  // Line ranges move under a fold-in; re-measure them for the slicer.
   planReindexed = documents.plan_reviews.some((r) => r.fold && r.fold.commit_sha) || Boolean(appliedPlan && appliedPlan.commit_sha)
-  if (planReindexed) {
-    const remeasured = await callAgent(
-      [
-        'Read ' + PLAN_PATH + ' as it stands NOW and report every "### Task N" section in order with its files',
-        'and its line range (grep -n "^### Task" and "^## Global Constraints"; the range ends where the next',
-        'section starts). Report the commit_sha as `git rev-parse HEAD`. Do not edit anything.',
-      ].join('\n'),
-      { label: 'plan-index', phase: 'Plan review', model: CODER, effort: 'low', schema: PLANDOC_SCHEMA }
-    )
-    // Only the measurements are replaced; the plan writer's decisions stay on the record.
-    if (remeasured) { planDoc = { ...remeasured, decisions: planDoc.decisions || [] }; documents.plan = planDoc }
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1395,7 +1427,29 @@ if (documents.spec || documents.plan) {
     { label: 'decision-record', phase: 'Plan review', model: CODER, effort: EFFORT, schema: FOLD_SCHEMA }
   )
   documents.decision_record = { entries: record, commit_sha: recorded ? recorded.commit_sha : null, summary: recorded ? recorded.summary : 'recorder returned nothing' }
-  log('decision record: ' + record.length + ' decision(s) written into ' + targets.join(' and ') + (recorded && recorded.commit_sha ? ' @ ' + recorded.commit_sha.slice(0, 8) : ' (NOT committed — report this)'))
+  log('decision record: ' + record.length + ' decision(s) written into ' + targets.join(' and ') + (recorded && recorded.commit_sha ? ' @ ' + recorded.commit_sha.slice(0, 8) : ' (NOT committed)'))
+  // The record is the one place every decision behind the build is written down; code
+  // must not be built without it. The resume is cheap: everything before replays from cache.
+  if (!recorded) {
+    return { ok: false, stage: 'record', error: 'the recorder returned nothing after its fallback; the decision record is not committed and no code was built. Relaunch to retry.',
+      recon, documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null }, lane_errors: laneErrors }
+  }
+  planReindexed = planReindexed || Boolean(documents.plan && recorded.commit_sha)
+}
+
+// Line ranges move under a fold-in, an answers commit and the recorder's edits, and the
+// slicer hands them to implementers as pointers — so the plan is measured once, AFTER
+// the last agent that wrote into it. The plan writer's decisions stay on the record.
+if (planReindexed && planDoc) {
+  const remeasured = await callAgent(
+    [
+      'Read ' + PLAN_PATH + ' as it stands NOW and report every "### Task N" section in order with its files',
+      'and its line range (grep -n "^### Task" and "^## Global Constraints"; the range ends where the next',
+      'section starts). Report the commit_sha as `git rev-parse HEAD`. Do not edit anything.',
+    ].join('\n'),
+    { label: 'plan-index', phase: 'Plan review', model: CODER, effort: 'low', schema: PLANDOC_SCHEMA }
+  )
+  if (remeasured) { planDoc = { ...remeasured, decisions: planDoc.decisions || [], open_questions: planDoc.open_questions || [] }; documents.plan = planDoc }
 }
 
 // ---------------------------------------------------------------------------
@@ -1847,8 +1901,9 @@ while (
   // Patchers used to run all at once in the shared tree, one per finding, and the
   // verifiers kept meeting sibling patchers' uncommitted edits. Same cure as the
   // implement phase: findings that name the same file run one after another, groups
-  // run in parallel, and every patch still gets its own verifier — those run as soon
-  // as their patch lands, in parallel across the round.
+  // run in parallel, and every patch still gets its own verifier — run to completion
+  // BEFORE the next patcher in the group starts, or the verifier's check meets that
+  // patcher's half-written edits in the very file it is verifying.
   const patchGroups = groupByFileConflict(take.map((f) => ({ id: f.id, files: patchFootprint(f), finding: f })))
   log('round ' + round + ': ' + take.length + ' patch(es) in ' + patchGroups.length + ' file-disjoint group(s)')
 
@@ -1922,18 +1977,18 @@ while (
   // reported `failed` gets no Opus verifier sent to `git show undefined`. The finding
   // is carried to the orchestrator by collectForOrchestrator either way.
   async function patchGroup(group) {
-    const verifies = []
+    const out = []
     for (const item of group.slices) {
       const p = await patchOne(item.finding)
       if (!p) continue
       if (!p.patch || p.patch.status === 'failed') {
         log('patch ' + item.finding.id + ': ' + (p.patch ? 'patcher reported failed' : 'patcher returned nothing') + ' — no verifier sent')
-        verifies.push(Promise.resolve({ ...p, verify: null }))
+        out.push({ ...p, verify: null })
         continue
       }
-      verifies.push(verifyOne(p))
+      out.push(await verifyOne(p))
     }
-    return parallel(verifies.map((v) => () => v))
+    return out
   }
 
   const patched = (await runGroups(patchGroups, WAVE, patchGroup, 'patch wave')).filter(Boolean).flat()

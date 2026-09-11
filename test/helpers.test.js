@@ -197,3 +197,18 @@ test('patchFootprint takes every file a finding names, falling back to the singl
   assert.deepEqual(H.patchFootprint({ id: 'F2', file: 'src/a.py', files: ['src/a.py', 'test/a.test.py'] }), ['src/a.py', 'test/a.test.py'])
   assert.deepEqual(H.patchFootprint({ id: 'F3' }), [])
 })
+
+test('namespaced keeps two different questions that collide on id, and drops only a true duplicate', () => {
+  const out = H.namespaced('spec', [
+    { id: 'Q1', question: 'Delete old rows?' },
+    { id: 'Q1', question: 'Charge the card?' },
+    { id: 'spec:Q1', question: 'Delete old rows?' },
+  ])
+  assert.deepEqual(out.map((q) => [q.id, q.question]), [['spec:Q1', 'Delete old rows?'], ['spec:Q1-2', 'Charge the card?']])
+})
+
+test('mergePrices ignores a negative override', () => {
+  const p = H.mergePrices(H.DEFAULT_PRICES, { sonnet: { in: -3, out: 0 } })
+  assert.equal(p.sonnet.in, H.DEFAULT_PRICES.sonnet.in)
+  assert.equal(p.sonnet.out, 0)
+})
