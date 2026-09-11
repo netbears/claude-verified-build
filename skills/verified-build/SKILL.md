@@ -159,9 +159,13 @@ Otherwise the return value is structured. Report these, and in this order:
 2. **`repo.executable_checks`** — if `false`, nothing was ever executed in this run
    and every verdict below rests on reading the diff. State that in the same breath
    as the headline, not as a footnote.
-3. **`open_findings`** — findings still standing. If `stopped_at_round_cap` is true
-   these were never patched; the run hit its round limit. That is a real,
-   reportable outcome, not a footnote.
+3. **`for_orchestrator`** — the complete list of what is still unresolved, at
+   **every** severity: the last review's `open_findings` plus everything any round
+   handed off (below `patchSeverity`) or deferred (past the per-round cap), each
+   tagged with its `source`. `for_orchestrator_by_severity` gives the counts. This
+   list is not a footnote and it is not the user's to-do — it is yours; see
+   "Close the leftovers yourself" below. If `stopped_at_round_cap` is true the
+   review-left findings were never patched at all.
 4. **`failed_verification`** — slices whose commits a verifier would not sign off.
 5. **`plan.uncovered`** — scope the planner admitted dropping up front.
    Also glance at **`plan.groups`** vs **`plan.largest_group`**: a `largest_group`
@@ -185,12 +189,40 @@ Otherwise the return value is structured. Report these, and in this order:
    exactly as before.
 
 Then give the user the diff command from `diff_command` so they can read the whole
-thing themselves. `repo.check_command` is what was actually run, and
+thing themselves — after you have closed the leftovers, so the diff they read is the
+finished one. `repo.check_command` is what was actually run, and
 `repo.other_checks` lists checks Recon found but did not make primary — worth
 mentioning if the user asks how thoroughly it was exercised.
 
 **Never report a clean run when `clean` is not `true`.** The entire point of paying
 for an adversary is that its verdict survives contact with the summary.
+
+## Close the leftovers yourself — all of them, minors included
+
+The engine stops after one patch round and auto-patches only critical and major
+findings on purpose: the second round and the minor patches were measured to cost more
+than they returned, and the orchestrator closing them by hand was faster and safer
+every time. That bargain only holds if you actually do it. So, before you write the
+report, work through **every** entry in `for_orchestrator`, critical first, minors
+included, and do not stop at the severity you find convenient:
+
+1. Read the finding's `failure_scenario` and the code it names. Decide honestly
+   whether it is real. A finding you refute needs the same concrete evidence a
+   patcher's dispute would — a command you ran, a line you read — written into the
+   report; "seems fine" is not a refutation.
+2. Fix each real one the way the finding's `fix_hint` suggests unless you have a
+   better reason, with a regression test where the repo can run one. Do not widen
+   scope; a leftover round is the worst moment to refactor.
+3. Run the repo's check after the fixes — the full suite where one exists, not just
+   the smoke command the lanes ran, because the smoke set is exactly what let the
+   leftovers through — and commit, one concern per commit, in the repo's convention.
+4. Report every entry with its outcome: **fixed** (with the commit), **refuted**
+   (with the evidence), or **left open** (with why, which should be rare and never
+   "it was only minor"). A finding you did not look at is left open, and you say so.
+
+The user reads the report to learn what shipped. A list of findings you decided not
+to touch is not a shipped state; it is homework handed back to the person who paid
+for the run to avoid it.
 
 ## Tuned from six runs (2026-09-11)
 

@@ -941,6 +941,33 @@ while (
 const openFindings = review && Array.isArray(review.findings) && review.clean !== true ? review.findings : []
 const stoppedEarly = round >= MAX_ROUNDS && openFindings.length > 0
 
+// Everything the orchestrator must close by hand, at EVERY severity: what the last
+// review left standing, plus every finding a round handed off (below PATCH_SEVERITY)
+// or deferred (past the per-round cap), unless a later review explicitly re-raised
+// it under the same id (then it is already in openFindings) — a later review that
+// simply did not mention a handed-off minor has not closed it. Sorted critical first.
+const forOrchestrator = []
+const seenIds = new Set()
+for (const f of openFindings) {
+  if (f && f.id && !seenIds.has(f.id)) { seenIds.add(f.id); forOrchestrator.push({ ...f, source: 'final review' }) }
+}
+for (const r of rounds) {
+  for (const f of [...(r.handed_off || []), ...(r.deferred || [])]) {
+    if (f && f.id && !seenIds.has(f.id)) {
+      seenIds.add(f.id)
+      forOrchestrator.push({ ...f, source: (r.handed_off || []).includes(f) ? 'handed off in round ' + r.round : 'deferred in round ' + r.round })
+    }
+  }
+}
+forOrchestrator.sort((a, b) => severityRank(a.severity) - severityRank(b.severity))
+const bySeverity = { critical: 0, major: 0, minor: 0 }
+for (const f of forOrchestrator) bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1
+if (forOrchestrator.length) {
+  log('FOR THE ORCHESTRATOR TO CLOSE BY HAND: ' + forOrchestrator.length + ' finding(s) — ' +
+    bySeverity.critical + ' critical, ' + bySeverity.major + ' major, ' + bySeverity.minor + ' minor: ' +
+    forOrchestrator.map((f) => f.id + ' (' + f.severity + ')').join(', '))
+}
+
 if (stoppedEarly) {
   log('STOPPED at the ' + MAX_ROUNDS + '-round cap with ' + openFindings.length + ' finding(s) still open')
 } else if (openFindings.length === 0) {
@@ -984,5 +1011,10 @@ return {
   patch_rounds: rounds,
   final_review: review,
   open_findings: openFindings,
+  // The complete to-do for the orchestrator, every severity included (minors too):
+  // the last review's findings plus everything handed off or deferred in any round.
+  // The skill makes closing ALL of these, by hand, the orchestrator's last step.
+  for_orchestrator: forOrchestrator,
+  for_orchestrator_by_severity: bySeverity,
   stopped_at_round_cap: stoppedEarly,
 }
