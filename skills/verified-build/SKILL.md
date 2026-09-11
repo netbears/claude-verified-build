@@ -178,6 +178,9 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `specDir` / `plansDir` | repo convention, else `docs/specs` / `docs/plans` | where the engine writes its documents |
 | `spec` / `plan` | — | the path of an existing document when `from` is `spec` or `plan` and `task` is not itself that path |
 | `pauseForOwner` | `true` | pause and return the owner questions a writer or reviewer escalated; `false` = the recommended option stands, no pause |
+| `approveEstimate` | `false` | pass `true` on the resume after the cost gate to start implementing |
+| `maxUsd` | — | a ceiling in USD at API list prices; the cost gate passes without pausing when the expected total is within it |
+| `prices` | list prices cached 2026-06-24 | override `{sonnet, opus, fable}` × `{in, out, cache_read, cache_write}` USD per million tokens |
 | `answers` | — | `[{id, answer}]` for the questions a paused run returned (ids look like `spec:Q1`); pass on the resume, keeping earlier answers |
 | `testCmd` | discovered by Recon | exact command every lane runs; overrides discovery |
 | `wave` | `15` | max agents live at once: parallel groups while implementing, parallel verifiers after (capped at 16, and by the runtime's own `min(16, cpus-2)`) |
@@ -223,6 +226,33 @@ Never answer an owner question yourself. The pause exists because the writer jud
 this decision to be the owner's; a decision you take there is exactly the silent
 decision the pause was built to prevent.
 
+## The cost gate
+
+After slicing and before the first implementer, the engine returns early with
+`paused:true, stage:'estimate'` and an `estimate` unless `approveEstimate:true` (or a
+covering `maxUsd`) was passed. The estimate is deterministic: a per-agent token profile
+measured over six runs, priced at Anthropic's first-party API list prices, that is, what
+a **non-subscription licence** would be billed. It carries `spent_so_far_usd` (the front
+half, already run), `ahead_usd` with a low–high band (the spread the measured runs
+showed at that slice count), `total_expected_usd`,
+`of_which_from_unmeasured_assumptions_usd` (the front-half rows were assumed, not
+measured, when this was written), the price table, and a per-phase `breakdown`.
+
+Do this:
+
+1. Show the user the figure as a short table: spent so far, ahead (low–high), total,
+   and the share resting on assumptions; say in one line that it is API list pricing and
+   that a subscription is not billed per token but the size of the run is the same.
+2. Ask with one `AskUserQuestion`: proceed, or stop. Never approve on the user's
+   behalf, and never pass `approveEstimate:true` or `maxUsd` on the first launch to skip
+   the gate unless the user has said so for that run.
+3. On proceed, relaunch with the same script, `resumeFromRunId`, and the original args
+   plus `approveEstimate:true`. Everything before the gate replays from cache. On stop,
+   report that the documents are committed on the branch and nothing was implemented.
+
+At the end, `cost.estimate` and `cost.output_tokens_actually_spent_this_turn` come back
+together; report both so the profile can be corrected when it is off.
+
 ## While it runs
 
 It is a background run: you get a task id immediately and a notification when it
@@ -232,8 +262,8 @@ before the notification lands, say it is still running.
 
 ## Reading the result
 
-First check `paused` — a paused run is handled by the section above, not reported as
-a result. Then check `ok`. A run that returned `ok:false` with `stage:'recon'` never started —
+First check `paused` — a paused run is handled by "When the run pauses with questions"
+or "The cost gate" above (`stage` says which), not reported as a result. Then check `ok`. A run that returned `ok:false` with `stage:'recon'` never started —
 report the reason (dirty tree, trunk, not a repo) and what to do about it, rather than
 describing it as a failed build.
 

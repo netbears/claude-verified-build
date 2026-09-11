@@ -64,6 +64,15 @@ patch-introduced defects, which is why the defaults are now one patch round and
 critical/major findings only; the rest of the findings come back to the orchestrator.
 The full record is in `SKILL.md` under "Tuned from six runs".
 
+## The cost gate
+
+After slicing and before the first line of code the run pauses with a USD estimate at
+Anthropic's first-party API list prices (what a non-subscription licence would be billed):
+spent so far, ahead with a low–high band, the total, and how much rests on rows not yet
+measured. The orchestrator shows it and resumes with `approveEstimate:true`. The per-agent
+token profile behind it is in the engine (`PROFILE`); correct it from real transcripts as
+runs accumulate.
+
 ## Changing it
 
 Edit, run `./check.sh`, reinstall everywhere with `install.sh`, commit. Keep the engine at

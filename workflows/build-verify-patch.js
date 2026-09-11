@@ -60,6 +60,24 @@ const PLAN_PATH_IN = String(input.plan || '').trim()
 // the user, then relaunches with resumeFromRunId and args.answers; every agent before the
 // pause replays from cache because no prompt before it mentions the answers.
 // pauseForOwner:false restores the fully autonomous run: the recommended option stands.
+// The cost gate. Before the first implementer runs, the engine computes what the rest of
+// the run would cost at Anthropic's first-party API list prices (a non-subscription
+// licence) from a per-agent token profile measured over six runs, and RETURNS EARLY with
+// it unless approveEstimate:true was passed (or maxUsd covers the expected figure). The
+// orchestrator shows it to the user and resumes the same run; everything before the gate
+// replays from cache. Subscription users are not billed per token — the figure is what
+// the run would cost at list prices, which is still the honest measure of its size.
+const APPROVE_ESTIMATE = input.approveEstimate === true
+const MAX_USD = Number(input.maxUsd) > 0 ? Number(input.maxUsd) : null
+// USD per million tokens, Anthropic first-party API list prices (cached 2026-06-24):
+// input / output / cache read / cache write (5-minute, 1.25x input). Override with
+// args.prices = { sonnet: {...}, opus: {...}, fable: {...} } when the list changes.
+const PRICES = {
+  sonnet: { in: 2, out: 10, cache_read: 0.20, cache_write: 2.50 },
+  opus: { in: 5, out: 25, cache_read: 0.50, cache_write: 6.25 },
+  fable: { in: 10, out: 50, cache_read: 0.25, cache_write: 12.50 },
+  ...(input.prices && typeof input.prices === 'object' ? input.prices : {}),
+}
 const PAUSE_FOR_OWNER = input.pauseForOwner !== false
 const ANSWERS = Array.isArray(input.answers)
   ? input.answers.filter((a) => a && a.id).map((a) => ({ id: String(a.id), answer: String(a.answer || '') }))
@@ -577,6 +595,61 @@ const PLANDOC_SCHEMA = {
     },
     commit_sha: { type: 'string' },
   },
+}
+
+// ---------------------------------------------------------------------------
+// Token profile per agent, in MILLIONS of tokens: cache reads, cache writes,
+// output. Measured over six runs on one repo, 9–11 Sep 2026 (262 agents, ~2.3B
+// cached-read tokens, reconstructed from every agent's transcript). The front
+// half (spec/plan writers, document reviewers, fold-ins, recorder) had not run
+// when this was written; those rows are ASSUMPTIONS and are labelled so in the
+// estimate. Refine them from a run's transcripts once there are some.
+// ---------------------------------------------------------------------------
+const PROFILE = {
+  recon: { model: CODER, cache: 5.5, write: 0.2, out: 0.017, measured: true },
+  slice: { model: JUDGE, cache: 1.0, write: 0.2, out: 0.015, measured: true },
+  implement: { model: CODER, cache: 13.0, write: 0.17, out: 0.025, measured: true },   // per slice
+  verify: { model: JUDGE, cache: 3.9, write: 0.19, out: 0.004, measured: true },       // per slice
+  review: { model: JUDGE, cache: 17.0, write: 0.45, out: 0.011, measured: true },      // per adversarial pass
+  patch: { model: CODER, cache: 12.0, write: 0.08, out: 0.030, measured: true },       // per patched finding
+  patch_verify: { model: JUDGE, cache: 5.5, write: 0.05, out: 0.005, measured: true }, // per patched finding
+  spec: { model: JUDGE, cache: 10.0, write: 0.3, out: 0.030, measured: false },
+  doc_review: { model: JUDGE, cache: 15.0, write: 0.3, out: 0.015, measured: false },   // spec reviewer
+  doc_fold: { model: JUDGE, cache: 10.0, write: 0.3, out: 0.020, measured: false },
+  plan_doc: { model: JUDGE, cache: 20.0, write: 0.4, out: 0.060, measured: false },
+  plan_review: { model: JUDGE, cache: 25.0, write: 0.4, out: 0.020, measured: false },
+  answers: { model: JUDGE, cache: 8.0, write: 0.2, out: 0.015, measured: false },
+  record: { model: CODER, cache: 3.0, write: 0.1, out: 0.005, measured: false },
+  plan_index: { model: CODER, cache: 1.5, write: 0.05, out: 0.003, measured: false },
+}
+
+function priceOf(model) {
+  return PRICES[model] || PRICES.opus
+}
+
+function lineCost(row, n) {
+  const p = priceOf(row.model)
+  const usd = n * (row.cache * p.cache_read + row.write * p.cache_write + row.out * p.out)
+  return { agents: n, model: row.model, measured: row.measured,
+    cache_mtok: +(n * row.cache).toFixed(1), write_mtok: +(n * row.write).toFixed(2), out_mtok: +(n * row.out).toFixed(3),
+    usd: +usd.toFixed(2) }
+}
+
+function estimateRun(spent, ahead) {
+  // spent / ahead: { <profile key>: count }. Returns the breakdown and the totals.
+  const lines = {}
+  let spentUsd = 0
+  let aheadUsd = 0
+  let assumed = 0
+  for (const [k, n] of Object.entries(spent)) {
+    if (!n || !PROFILE[k]) continue
+    const l = lineCost(PROFILE[k], n); lines['done:' + k] = l; spentUsd += l.usd; if (!l.measured) assumed += l.usd
+  }
+  for (const [k, n] of Object.entries(ahead)) {
+    if (!n || !PROFILE[k]) continue
+    const l = lineCost(PROFILE[k], n); lines['ahead:' + k] = l; aheadUsd += l.usd; if (!l.measured) assumed += l.usd
+  }
+  return { lines, spent_usd: +spentUsd.toFixed(2), ahead_usd: +aheadUsd.toFixed(2), assumed_usd: +assumed.toFixed(2) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,6 +1243,70 @@ if (groups.length === 1 && plan.slices.length > 2) {
 }
 
 // ---------------------------------------------------------------------------
+// The cost gate — what the rest of the run would cost at API list prices.
+// ---------------------------------------------------------------------------
+const spentCounts = {
+  recon: 1,
+  spec: documents.spec ? 1 : 0,
+  doc_review: documents.spec_reviews.filter((r) => r.review).length,
+  doc_fold: documents.spec_reviews.filter((r) => r.fold).length + documents.plan_reviews.filter((r) => r.fold).length,
+  plan_doc: documents.plan && FROM !== 'plan' ? 1 : 0,
+  plan_review: documents.plan_reviews.filter((r) => r.review).length,
+  answers: (ANSWERS.length ? 1 : 0),
+  record: documents.decision_record ? 1 : 0,
+  plan_index: documents.plan_reviews.some((r) => r.fold && r.fold.commit_sha) ? 1 : 0,
+  slice: 1,
+}
+const nSlices = plan.slices.length
+// Measured: the first review raised about one finding per slice; ~60% sat at or above
+// "major". The per-round cap and the severity gate bound it from above.
+const patchedPerRound = Math.min(MAX_PATCH_PER_ROUND, Math.max(2, Math.round(nSlices * (PATCH_SEVERITY === 'minor' ? 1.0 : PATCH_SEVERITY === 'critical' ? 0.25 : 0.6))))
+const aheadCounts = {
+  implement: nSlices,
+  verify: nSlices,
+  review: 1 + MAX_ROUNDS,
+  patch: MAX_ROUNDS * patchedPerRound,
+  patch_verify: MAX_ROUNDS * patchedPerRound,
+}
+const est = estimateRun(spentCounts, aheadCounts)
+const estimate = {
+  currency: 'USD',
+  basis: 'Anthropic first-party API list prices (a non-subscription licence), cached 2026-06-24; per-agent token profile measured over six runs on 2026-09-09..11. Subscription users are not billed per token: this is the size of the run at list prices.',
+  prices_per_mtok: PRICES,
+  slices: nSlices,
+  patch_rounds: MAX_ROUNDS,
+  expected_patched_findings_per_round: patchedPerRound,
+  spent_so_far_usd: est.spent_usd,
+  ahead_usd: est.ahead_usd,
+  ahead_low_usd: +(est.ahead_usd * 0.6).toFixed(2),
+  ahead_high_usd: +(est.ahead_usd * 1.6).toFixed(2),
+  total_expected_usd: +(est.spent_usd + est.ahead_usd).toFixed(2),
+  of_which_from_unmeasured_assumptions_usd: est.assumed_usd,
+  output_tokens_actually_spent_this_turn: budget.spent(),
+  breakdown: est.lines,
+  note: 'The low/high band is the spread the six measured runs showed at a given slice count. A fallback lane (Fable at ~2x Opus) is not in the figure; models.fallbacks.used in the final result says if one ran.',
+}
+log('COST ESTIMATE at API list prices: ~$' + est.spent_usd + ' spent so far, ~$' + est.ahead_usd +
+  ' ahead ($' + estimate.ahead_low_usd + '–$' + estimate.ahead_high_usd + ') for ' + nSlices + ' slice(s), ' +
+  MAX_ROUNDS + ' patch round(s); total ~$' + estimate.total_expected_usd)
+if (!APPROVE_ESTIMATE && !(MAX_USD !== null && estimate.total_expected_usd <= MAX_USD)) {
+  log('PAUSED at the cost gate — relaunch with approveEstimate:true (or maxUsd) to build')
+  return {
+    ok: true,
+    paused: true,
+    stage: 'estimate',
+    estimate: estimate,
+    how_to_resume: 'Show the user the estimate (expected, the low–high band, what is measured vs assumed) and ask whether to ' +
+      'proceed. On yes, relaunch this workflow with the SAME script and resumeFromRunId, and args identical plus ' +
+      'approveEstimate:true (or maxUsd:<their ceiling>). Every agent before this gate replays from cache. On no, stop: the ' +
+      'documents are committed on the branch and nothing has been implemented.',
+    plan: { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [] },
+    documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null },
+    recon: recon,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 2 — Implement. ONE AGENT PER SLICE, always. A group means "these run in
 // order", not "these share a context": file-disjointness governs concurrency and
 // nothing else. Merging N slices into one agent is how a run ends up with a
@@ -1562,6 +1699,9 @@ return {
     other_checks: (recon.verify_commands || []).slice(1),
   },
   paused: false,
+  // The pre-build estimate, and the one actual figure the runtime exposes: output tokens
+  // spent this turn across the main loop and every workflow. Compare the two.
+  cost: { estimate: estimate, output_tokens_actually_spent_this_turn: budget.spent() },
   patch_policy: { max_rounds: MAX_ROUNDS, auto_patch_at_or_above: PATCH_SEVERITY },
   // The front half: where the run started, the documents it wrote and committed, every
   // adversarial review and fold-in of them, and — first thing to report — every decision a
