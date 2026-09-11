@@ -1,0 +1,7 @@
+# The engine is plain JS with no dependencies: a syntax check and node:test are the
+# whole suite. The same job runs on the GitHub mirror (.github/workflows/check.yml).
+check:
+  image: node:22-alpine
+  script:
+    - apk add --no-cache git
+    - ./check.sh
