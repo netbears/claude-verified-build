@@ -52,6 +52,20 @@ const PLANS_DIR_IN = String(input.plansDir || '').trim()
 // not itself the path.
 const SPEC_PATH_IN = String(input.spec || '').trim()
 const PLAN_PATH_IN = String(input.plan || '').trim()
+// Owner questions. A spec or plan writer that meets a decision the owner should make —
+// money, risk, data, ownership, a reversal of something that exists, or a choice careful
+// colleagues would make differently — records it as a QUESTION with options and a
+// recommendation instead of deciding. If any such question is unanswered when its stage
+// ends, the run RETURNS EARLY ({paused:true, questions:[…]}) so the orchestrator can ask
+// the user, then relaunches with resumeFromRunId and args.answers; every agent before the
+// pause replays from cache because no prompt before it mentions the answers.
+// pauseForOwner:false restores the fully autonomous run: the recommended option stands.
+const PAUSE_FOR_OWNER = input.pauseForOwner !== false
+const ANSWERS = Array.isArray(input.answers)
+  ? input.answers.filter((a) => a && a.id).map((a) => ({ id: String(a.id), answer: String(a.answer || '') }))
+  : (input.answers && typeof input.answers === 'object'
+    ? Object.keys(input.answers).map((k) => ({ id: String(k), answer: String(input.answers[k] || '') }))
+    : [])
 const MAX_SLICES = Number(input.maxSlices) > 0 ? Math.min(Number(input.maxSlices), 20) : 15
 const MAX_PATCH_PER_ROUND = 15
 const CODER = 'sonnet'
@@ -438,6 +452,31 @@ const DOCTRINE_DEBUG = "DOCTRINE (from the superpowers `systematic-debugging` sk
 const DOCTRINE_REVIEW_CALIBRATION = "CALIBRATION (from the superpowers code-reviewer template): categorise by ACTUAL severity \u2014 not\neverything is critical. Be specific (file:line, not vague), explain WHY each issue matters and how to\nfix it if not obvious, and give a clear verdict. Never say \"looks good\" without checking, never mark a\nnitpick critical, never report on code you did not read, never be vague (\"improve error handling\"). If a\ndeviation from the plan looks intentional, say so as a deviation rather than a defect; if the plan\nitself is wrong, say that. Your review is read-only on this checkout: never mutate the working tree,\nthe index, HEAD or branch state; if you need another revision, use a separate `git worktree` in a\ntemporary directory. Do the whole review yourself: never spawn a subagent to review part of it.\n"
 const DOCTRINE_RECEIVING = "DOCTRINE FOR FOLDING IN A REVIEW (from the superpowers `receiving-code-review` skill):\n\nReview feedback needs technical evaluation, not performance. For each finding: READ it completely;\nrestate the requirement in your own words; VERIFY it against the document and the codebase; EVALUATE\nwhether it is right for THIS repo; then RESPOND \u2014 fold it in, or refute it with technical reasoning and\nconcrete evidence (a command you ran, a line you read). Never fold in a finding you have not verified;\nnever refuse one merely because it is inconvenient. Push back when the finding breaks something that\nexists, lacks context the document states, violates YAGNI, or contradicts a decision the owner already\nrecorded \u2014 and in that last case leave the owner's decision standing and say why. Fold in one finding at\na time; keep the document consistent after each (a change in one section usually has echoes in the\nFile map, the overlap table, the self-review and the tests). No gratitude, no \"you're absolutely\nright\": state what changed. Record the disposition of every finding, folded or refuted, in a fold-in\nsection at the end of the document.\n"
 
+const QUESTION_ITEMS = {
+  type: 'array',
+  description: 'Decisions the OWNER should make, not you. Escalate only when the choice affects money, risk, data, ownership, reverses something that exists, or careful colleagues would decide it differently. Everything else you decide and record.',
+  items: {
+    type: 'object', additionalProperties: false,
+    required: ['id', 'question', 'options', 'recommended', 'why'],
+    properties: {
+      id: { type: 'string', description: 'Q1, Q2, … — unique within this document.' },
+      question: { type: 'string', description: 'One sentence, in the owner\'s terms, ending in a question mark.' },
+      options: {
+        type: 'array', minItems: 2, maxItems: 4,
+        items: {
+          type: 'object', additionalProperties: false, required: ['label', 'consequence'],
+          properties: {
+            label: { type: 'string', description: 'Short: what the owner would pick.' },
+            consequence: { type: 'string', description: 'What choosing it means, concretely, for scope, behaviour, data or cost.' },
+          },
+        },
+      },
+      recommended: { type: 'string', description: 'The label of the option you recommend. It is also the provisional decision written into the document, marked "pending owner".' },
+      why: { type: 'string', description: 'Why you recommend it, in one or two sentences.' },
+    },
+  },
+}
+
 const SPEC_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -457,6 +496,7 @@ const SPEC_SCHEMA = {
       },
     },
     out_of_scope: { type: 'array', items: { type: 'string' }, description: 'Sub-projects or requirements deliberately left for a later spec.' },
+    open_questions: QUESTION_ITEMS,
     commit_sha: { type: 'string' },
   },
 }
@@ -483,6 +523,7 @@ const DOC_REVIEW_SCHEMA = {
       },
     },
     recommendations: { type: 'array', items: { type: 'string' }, description: 'Advisory; never blocks.' },
+    questions_for_owner: QUESTION_ITEMS,
     summary: { type: 'string' },
   },
 }
@@ -655,10 +696,95 @@ const SPEC_DIR = SPEC_DIR_IN || (/(docs\/[\w./-]*specs)/.exec(DOCS_LAYOUT) || [n
 const PLANS_DIR = PLANS_DIR_IN || (/(docs\/[\w./-]*plans)/.exec(DOCS_LAYOUT) || [null, 'docs/plans'])[1]
 const COMMIT_RULES = 'Commit in this repo\'s own convention' + (recon.conventions ? ' (its stated conventions: ' + recon.conventions.slice(0, 1500) + ')' : '') + '. Do NOT push.'
 
-const documents = { from: FROM, spec: null, spec_reviews: [], plan: null, plan_reviews: [], decisions: [] }
+const documents = { from: FROM, spec: null, spec_reviews: [], plan: null, plan_reviews: [], decisions: [], questions: [], answers: ANSWERS }
+// Declared here, before the helpers that read them, so a pause at the spec stage can
+// report both without tripping over a `let` further down that has not run yet.
+let SPEC_PATH = SPEC_PATH_IN || (FROM === 'spec' && looksLikePath(TASK) ? TASK.trim() : '')
+let PLAN_PATH = PLAN_PATH_IN || (FROM === 'plan' && looksLikePath(TASK) ? TASK.trim() : '')
+let planDoc = null
 
 function looksLikePath(t) {
   return /^[\w./-]+\.md$/.test(t.trim()) && !/\s/.test(t.trim())
+}
+
+// Questions are namespaced by stage ("spec:Q1") so an answer given for the spec's
+// pause is never mistaken for a plan question of the same local id, and so the
+// apply-answers prompt for the spec stays byte-identical across a later resume.
+function namespaced(stage, qs) {
+  const seen = new Set()
+  const out = []
+  for (const q of qs || []) {
+    if (!q || !q.id) continue
+    const id = stage + ':' + String(q.id).replace(/^\w+:/, '')
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push({ ...q, id })
+  }
+  return out
+}
+
+function answersFor(stage) {
+  return ANSWERS.filter((a) => a.id.startsWith(stage + ':') && a.answer.trim())
+}
+
+// Returns null to continue, or the early-return object when the run must pause.
+function ownerGate(stage, questions, docPath) {
+  const answered = new Set(answersFor(stage).map((a) => a.id))
+  const open = questions.filter((q) => !answered.has(q.id))
+  documents.questions.push(...questions.map((q) => ({ ...q, answered: answered.has(q.id) })))
+  if (!open.length) return null
+  if (!PAUSE_FOR_OWNER) {
+    log(stage + ': ' + open.length + ' owner question(s) left to the recommended option (pauseForOwner:false): ' +
+      open.map((q) => q.id + ' -> ' + q.recommended).join(', '))
+    documents.decisions.push(...open.map((q) => ({
+      stage: stage, question: q.question, decision: q.recommended + ' (recommended option, owner not asked)', why: q.why,
+    })))
+    return null
+  }
+  log('PAUSED at the ' + stage + ' stage: ' + open.length + ' question(s) for the owner — ' + open.map((q) => q.id).join(', '))
+  return {
+    ok: true,
+    paused: true,
+    stage: stage,
+    questions: open,
+    document: docPath,
+    how_to_resume: 'Ask the user each question (recommended option first), then relaunch this workflow with the SAME script ' +
+      'and resumeFromRunId, and args identical except `answers`: [{id, answer}] for every question above ' +
+      '(keep earlier answers too). Every agent before this pause replays from cache.',
+    answers_so_far: ANSWERS,
+    documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null },
+    recon: recon,
+  }
+}
+
+async function applyAnswers(stage, docPath, questions) {
+  const given = answersFor(stage)
+  if (!given.length) return null
+  const byId = Object.fromEntries(questions.map((q) => [q.id, q]))
+  const applied = await callAgent(
+    [
+      'You are the AUTHOR recording the OWNER\'S ANSWERS in your ' + stage + ': ' + docPath,
+      '',
+      'THE OWNER ANSWERED THESE QUESTIONS (the owner outranks every reviewer and every provisional decision):',
+      JSON.stringify(given.map((a) => ({ id: a.id, question: (byId[a.id] || {}).question || '', answer: a.answer,
+        options: (byId[a.id] || {}).options || [] })), null, 2),
+      '',
+      'DO THIS:',
+      '- For each answer, find the provisional decision marked "pending owner" and REPLACE it with the owner\'s',
+      '  decision, attributed to the owner. Where the owner picked a listed option, apply that option\'s',
+      '  consequence throughout the document (scope, behaviour, data, tests, out-of-scope lists). Where the',
+      '  owner wrote something else, treat it as the decision and reshape the affected sections to match.',
+      '- Keep the document whole and consistent afterwards; no placeholder may survive.',
+      '- Record every answer in the "Decisions taken without the owner" table\'s neighbour: a table titled',
+      '  "Decisions taken by the owner" (question, decision, date ' + TODAY + ').',
+      '- ' + COMMIT_RULES,
+    ].join('\n'),
+    { label: stage + '-answers', phase: stage === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: FOLD_SCHEMA }
+  )
+  documents.decisions.push(...given.map((a) => ({
+    stage: stage, question: (byId[a.id] || {}).question || a.id, decision: a.answer, why: 'the owner\'s answer',
+  })))
+  return applied
 }
 
 async function reviewAndFold(kind, docPath, extra) {
@@ -718,6 +844,10 @@ async function reviewAndFold(kind, docPath, extra) {
         '  two sentences that contradict each other. Under uncertainty, raise it — a false positive costs one',
         '  fold-in agent; a false negative costs a build.',
         '- status "approved" ONLY if you read the whole document and found nothing meeting that bar.',
+        '- A decision the document took that the OWNER should make (money, risk, data, ownership, a reversal',
+        '  of something that exists, a choice careful colleagues would make differently) is not a finding —',
+        '  put it in `questions_for_owner` with options, consequences and your recommendation. The run pauses',
+        '  and asks. Do not raise a question the document already lists as one.',
         '- You do not edit the document. You do not commit.',
         (r > 1 ? '\nThis is review round ' + r + '; the fold-in of round ' + (r - 1) + ' is already in the file.' : ''),
       ].join('\n'),
@@ -760,7 +890,6 @@ async function reviewAndFold(kind, docPath, extra) {
 }
 
 // ----- Spec ---------------------------------------------------------------
-let SPEC_PATH = SPEC_PATH_IN || (FROM === 'spec' && looksLikePath(TASK) ? TASK.trim() : '')
 if (FROM === 'idea') {
   phase('Spec')
   const spec = await callAgent(
@@ -785,6 +914,12 @@ if (FROM === 'idea') {
       '  the "Decisions taken without the owner" table.',
       '- Any constraint from the repo (principles in CLAUDE.md, module budgets, one-writer rules, channel',
       '  rules) that this work touches is restated in the spec, verbatim, as a hard constraint.',
+      '- QUESTIONS FOR THE OWNER: the doctrine above says decide and record. One exception. When a choice',
+      '  affects money, risk, data, ownership, reverses something that exists, or is one careful colleagues',
+      '  would make differently, do NOT decide it silently: put it in `open_questions` with two to four',
+      '  options, the consequence of each, and your recommendation with its reason; write the recommended',
+      '  option into the spec as the provisional decision, marked "pending owner", so the document is',
+      '  complete either way. The run will pause and ask the owner. Everything below that bar, decide.',
       '- ' + COMMIT_RULES,
     ].join('\n'),
     { label: 'spec', phase: 'Spec', model: JUDGE, effort: EFFORT, schema: SPEC_SCHEMA }
@@ -795,11 +930,17 @@ if (FROM === 'idea') {
   documents.decisions.push(...(spec.decisions || []).map((d) => ({ stage: 'spec', ...d })))
   log('spec: ' + spec.path + ' (' + spec.classification + ', ' + (spec.decisions || []).length + ' decision(s) taken without the owner)')
   documents.spec_reviews = await reviewAndFold('spec', SPEC_PATH, 'THE IDEA IT CAME FROM:\n' + TASK)
+  const specQuestions = namespaced('spec', [
+    ...(spec.open_questions || []),
+    ...documents.spec_reviews.flatMap((r) => (r.review && r.review.questions_for_owner) || []),
+  ])
+  const pause = ownerGate('spec', specQuestions, SPEC_PATH)
+  if (pause) return pause
+  const applied = await applyAnswers('spec', SPEC_PATH, specQuestions)
+  if (applied) log('spec: owner answers recorded (' + (applied.commit_sha || 'no commit') + ')')
 }
 
 // ----- Plan ---------------------------------------------------------------
-let PLAN_PATH = PLAN_PATH_IN || (FROM === 'plan' && looksLikePath(TASK) ? TASK.trim() : '')
-let planDoc = null
 if (FROM === 'idea' || FROM === 'spec') {
   phase('Plan')
   const specRef = SPEC_PATH ? 'THE SPEC: ' + SPEC_PATH + ' — read it whole; the plan argues from it.' : 'THE SPEC (inline):\n' + TASK
@@ -810,6 +951,10 @@ if (FROM === 'idea' || FROM === 'spec') {
       'measured against the CURRENT tree.',
       '',
       specRef,
+      (answersFor('spec').length
+        ? '\nTHE OWNER\'S ANSWERS to the spec\'s questions (binding; already folded into the spec):\n' +
+          JSON.stringify(answersFor('spec'), null, 2)
+        : ''),
       '',
       'THE REPO: ' + (recon.ecosystem || 'unknown') + ' on branch ' + (recon.branch || '?') + '.',
       (HAS_CHECKS ? 'Check command: ' + CHECK_CMD : 'No executable checks — say so in Global Constraints.'),
@@ -840,8 +985,13 @@ if (FROM === 'idea' || FROM === 'spec') {
   documents.plan = planDoc
   log('plan: ' + planDoc.path + ' (' + planDoc.tasks.length + ' task(s))')
   documents.plan_reviews = await reviewAndFold('plan', PLAN_PATH, (SPEC_PATH ? 'THE SPEC IT IMPLEMENTS: ' + SPEC_PATH : 'THE REQUIREMENTS:\n' + TASK))
+  const planQuestions = namespaced('plan', documents.plan_reviews.flatMap((r) => (r.review && r.review.questions_for_owner) || []))
+  const pausePlan = ownerGate('plan', planQuestions, PLAN_PATH)
+  if (pausePlan) return pausePlan
+  const appliedPlan = await applyAnswers('plan', PLAN_PATH, planQuestions)
+  if (appliedPlan) log('plan: owner answers recorded (' + (appliedPlan.commit_sha || 'no commit') + ')')
   // Line ranges move under a fold-in; re-measure them for the slicer.
-  const folded = documents.plan_reviews.some((r) => r.fold && r.fold.commit_sha)
+  const folded = documents.plan_reviews.some((r) => r.fold && r.fold.commit_sha) || Boolean(appliedPlan && appliedPlan.commit_sha)
   if (folded) {
     const remeasured = await callAgent(
       [
@@ -1353,11 +1503,12 @@ return {
     executable_checks: HAS_CHECKS,
     other_checks: (recon.verify_commands || []).slice(1),
   },
+  paused: false,
   patch_policy: { max_rounds: MAX_ROUNDS, auto_patch_at_or_above: PATCH_SEVERITY },
   // The front half: where the run started, the documents it wrote and committed, every
   // adversarial review and fold-in of them, and — first thing to report — every decision a
   // writer took because there was no owner to ask.
-  documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null, doc_rounds: DOC_ROUNDS },
+  documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null, doc_rounds: DOC_ROUNDS, pause_for_owner: PAUSE_FOR_OWNER },
   models: {
     implement: CODER, verify: JUDGE, review: JUDGE, effort: EFFORT, max_concurrent: WAVE,
     // Lanes whose primary model returned nothing and were re-run once on the other

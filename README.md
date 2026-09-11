@@ -9,9 +9,13 @@ done because the model that wrote it said so. Works on any git repo in any langu
 first agent (Recon) discovers from the repo itself what "the checks pass" means, so the
 engine is never hand-tuned per project.
 
-There is no human in the loop while it runs. A writer with a question decides the way a
-careful colleague would and records it in a "Decisions taken without the owner" table;
-those decisions come back first in the result, for the owner to overturn.
+The owner is asked the questions that are theirs and nothing else. A writer decides the
+small things the way a careful colleague would and records them in a "Decisions taken
+without the owner" table; a choice about money, risk, data, ownership or a reversal of
+something that exists becomes an owner question with options and a recommendation, and
+the run pauses (`paused:true`) until the orchestrator asks the user and resumes the same
+run with `answers` — everything before the pause replays from cache. Every decision comes
+back first in the result.
 
 The stages carry the doctrine of the [superpowers](https://github.com/obra/superpowers)
 skills (MIT, Jesse Vincent) — brainstorming, writing-plans, the spec and plan reviewer

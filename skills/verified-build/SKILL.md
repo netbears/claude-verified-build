@@ -27,12 +27,20 @@ where cheap, splicing a task into a scratch worktree — and one fold-in pass by
 author that verifies each finding before acting on it and refutes with evidence what
 does not hold.
 
-**There is no human in the loop while it runs.** A spec writer with a question does
-not stop; it decides, the way a careful colleague would, and records every such choice
-in a "Decisions taken without the owner" table. Those decisions come back in the result
-as `documents.decisions` and are the **first thing you report**, because they are the
-owner's to overturn. The plan may not silently reverse one; a reviewer who tries is
-refuted on that ground.
+**The owner is asked the questions that are theirs, and nothing else.** A spec or
+plan writer decides the small things the way a careful colleague would and records each
+in a "Decisions taken without the owner" table. But a choice that affects money, risk,
+data or ownership, reverses something that exists, or is one careful colleagues would
+make differently is escalated instead: it becomes an owner question with two to four
+options, the consequence of each, and a recommendation, and the recommended option is
+written into the document as the provisional decision, marked "pending owner", so the
+document is complete either way. The spec reviewer may add such questions too. If any
+is unanswered when its stage ends, **the run pauses**: it returns early with
+`paused:true` and the questions, and continues only when you relaunch it with the
+answers — see "When the run pauses with questions". `pauseForOwner:false` makes the run
+fully autonomous again; the recommended option then stands. Every decision, taken or
+answered, comes back as `documents.decisions` and is the **first thing you report**.
+The plan may not silently reverse one; a reviewer who tries is refuted on that ground.
 
 The stages carry the superpowers skills' doctrine, copied into the engine so the pair
 stays self-contained (MIT, Jesse Vincent): brainstorming for the spec writer,
@@ -163,6 +171,8 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `docRounds` | `1` | adversarial review + fold-in rounds per document the engine writes (0 = write, no review; max 2) |
 | `specDir` / `plansDir` | repo convention, else `docs/specs` / `docs/plans` | where the engine writes its documents |
 | `spec` / `plan` | — | the path of an existing document when `from` is `spec` or `plan` and `task` is not itself that path |
+| `pauseForOwner` | `true` | pause and return the owner questions a writer or reviewer escalated; `false` = the recommended option stands, no pause |
+| `answers` | — | `[{id, answer}]` for the questions a paused run returned (ids look like `spec:Q1`); pass on the resume, keeping earlier answers |
 | `testCmd` | discovered by Recon | exact command every lane runs; overrides discovery |
 | `wave` | `15` | max agents live at once: parallel groups while implementing, parallel verifiers after (capped at 16, and by the runtime's own `min(16, cpus-2)`) |
 | `maxSlices` | `15` | max parallel slices the planner may cut (capped at 20) |
@@ -177,6 +187,36 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 
 Pass a plain string instead of an object and it is taken as `task`.
 
+## When the run pauses with questions
+
+A result with `paused:true` is not a finished run and not a failure. It carries
+`stage` (`spec` or `plan`), `document` (the committed file, complete with the
+recommended options as provisional decisions), and `questions`, each with `question`,
+`options[].label` / `consequence`, `recommended` and `why`.
+
+Do this, in order, without editing the document yourself:
+
+1. **Ask the user every question in one `AskUserQuestion` call** (up to four per
+   call; more questions, more calls). One question per entry, the options as given, the
+   recommended one **first** with "(Recommended)" appended to its label, each option's
+   `consequence` as its description, and `why` in the question text. The user can pick
+   "Other" and type; pass that text as the answer verbatim.
+2. **Relaunch the same run**: `Workflow({ scriptPath: <the script file the launch
+   result named>, resumeFromRunId: <its run id>, args: { …the original args, answers:
+   [ …answers_so_far, {id, answer} for every question ] } })`. Same script, same task,
+   same knobs — only `answers` differs. Every agent before the pause replays from cache
+   at no cost; an author then records the owner's decisions in the document, commits,
+   and the run continues. A run can pause twice (once for the spec, once for the plan);
+   keep the spec answers in the list when you resume after the plan's pause.
+3. If the user cannot answer now, stop there and say so: the document is committed on
+   the branch with the recommended options marked pending, and the run resumes later
+   from the same run id in this session. Do not pass `pauseForOwner:false` to get past
+   a pause the user has not answered.
+
+Never answer an owner question yourself. The pause exists because the writer judged
+this decision to be the owner's; a decision you take there is exactly the silent
+decision the pause was built to prevent.
+
 ## While it runs
 
 It is a background run: you get a task id immediately and a notification when it
@@ -186,7 +226,8 @@ before the notification lands, say it is still running.
 
 ## Reading the result
 
-First check `ok`. A run that returned `ok:false` with `stage:'recon'` never started —
+First check `paused` — a paused run is handled by the section above, not reported as
+a result. Then check `ok`. A run that returned `ok:false` with `stage:'recon'` never started —
 report the reason (dirty tree, trunk, not a repo) and what to do about it, rather than
 describing it as a failed build.
 
