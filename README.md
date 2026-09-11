@@ -72,7 +72,7 @@ skills/verified-build/SKILL.md     the entry point: pre-flight, the arguments, t
 workflows/build-verify-patch.js    the engine: one deterministic Workflow script, plain JS, no dependencies
 install.sh                         copies the pair into one or more Claude config dirs (local or user@host:dir)
 check.sh                           node --check for the engine
-RELEASES.md                        what changed, by version
+CHANGELOG.md                        what changed, by version
 ```
 
 The two files are a pair and travel together. The names differ on purpose: an

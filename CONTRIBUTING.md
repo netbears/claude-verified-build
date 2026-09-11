@@ -20,7 +20,7 @@ copies that run it.
    the measurement when there is one.
 5. **Install everywhere** with `./install.sh <every profile> <host>:<dir>` and read the
    checksums it prints. Restart a resident session on a server.
-6. **Record it in `RELEASES.md`** under the next version, and tag the release.
+6. **Record it in `CHANGELOG.md`** under the next version, and tag the release.
 
 ## Rules the engine relies on
 
