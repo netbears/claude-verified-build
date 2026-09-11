@@ -567,6 +567,14 @@ const PLANDOC_SCHEMA = {
       },
     },
     global_constraints_lines: { type: 'string', description: 'Line range of the "## Global Constraints" section, e.g. "25-39".' },
+    decisions: {
+      type: 'array',
+      description: 'Every decision the PLAN took that the spec left open or that narrows/sequences the spec (a declared narrowing, a migration number, an ordering, a file boundary). Empty only if the plan took none.',
+      items: {
+        type: 'object', additionalProperties: false, required: ['question', 'decision', 'why'],
+        properties: { question: { type: 'string' }, decision: { type: 'string' }, why: { type: 'string' } },
+      },
+    },
     commit_sha: { type: 'string' },
   },
 }
@@ -977,13 +985,18 @@ if (FROM === 'idea' || FROM === 'spec') {
       '- Write to `' + PLANS_DIR + '/' + TODAY + '-<slug>.md`' + (SPEC_PATH ? ' (same slug as the spec).' : '.'),
       '- ' + COMMIT_RULES,
       '- Report every task with its files and its line range in the file AFTER your final edit (grep -n).',
+      '- Report in `decisions` every call the plan makes that the spec left open or that narrows it — a',
+      '  declared narrowing, a migration number, an ordering, a file boundary — and write the same list into',
+      '  the plan under a "## Decisions taken by the plan" heading. A narrowing hidden in a task body is the',
+      '  kind of decision an owner discovers only after the build.',
     ].join('\n'),
     { label: 'plan-doc', phase: 'Plan', model: JUDGE, effort: EFFORT, schema: PLANDOC_SCHEMA }
   )
   if (!planDoc) return { ok: false, stage: 'plan', error: 'the plan writer returned nothing', recon, documents }
   PLAN_PATH = planDoc.path
   documents.plan = planDoc
-  log('plan: ' + planDoc.path + ' (' + planDoc.tasks.length + ' task(s))')
+  documents.decisions.push(...(planDoc.decisions || []).map((d) => ({ stage: 'plan', ...d })))
+  log('plan: ' + planDoc.path + ' (' + planDoc.tasks.length + ' task(s), ' + (planDoc.decisions || []).length + ' decision(s))')
   documents.plan_reviews = await reviewAndFold('plan', PLAN_PATH, (SPEC_PATH ? 'THE SPEC IT IMPLEMENTS: ' + SPEC_PATH : 'THE REQUIREMENTS:\n' + TASK))
   const planQuestions = namespaced('plan', documents.plan_reviews.flatMap((r) => (r.review && r.review.questions_for_owner) || []))
   const pausePlan = ownerGate('plan', planQuestions, PLAN_PATH)
@@ -1003,6 +1016,51 @@ if (FROM === 'idea' || FROM === 'spec') {
     )
     if (remeasured) { planDoc = remeasured; documents.plan = remeasured }
   }
+}
+
+// ---------------------------------------------------------------------------
+// The decision record. Before any code is written, both documents the engine
+// wrote carry ONE complete list of every decision behind the build — taken by
+// the spec writer, the plan writer, a fold-in, or the owner — with who took it
+// and when, and no "pending owner" marker survives. That final state is what
+// gets committed and, after the merge, what main records.
+// ---------------------------------------------------------------------------
+if (documents.spec || documents.plan) {
+  phase('Plan review')
+  const record = documents.decisions.map((d, i) => ({
+    n: i + 1,
+    stage: d.stage,
+    by: d.why === 'the owner\'s answer' ? 'owner' : (String(d.decision).includes('owner not asked') ? 'engine (recommended option stood, owner not asked)' : 'engine (' + d.stage + ' writer)'),
+    question: d.question, decision: d.decision, why: d.why,
+  }))
+  const targets = [documents.spec ? SPEC_PATH : null, documents.plan ? PLAN_PATH : null].filter(Boolean)
+  const recorded = await callAgent(
+    [
+      'You are the RECORDER. Make the final decision record of this build explicit in the document(s) below,',
+      'then commit them. You write no code and change no decision.',
+      '',
+      'DOCUMENTS: ' + targets.join(', ') + (FROM === 'spec' ? '  (the spec was supplied by the owner and is NOT edited; only the plan is)' : ''),
+      'DATE: ' + TODAY,
+      '',
+      'THE DECISIONS, in the order they were taken:',
+      JSON.stringify(record, null, 2),
+      '',
+      'DO THIS, for each document:',
+      '- Append (or replace, if one exists) a section "## Decision record" holding ONE table with every',
+      '  decision above: number, stage, taken by (owner / engine), question, decision, why. Keep the',
+      '  documents\' own earlier tables ("Decisions taken without the owner", "Decisions taken by the owner",',
+      '  "Decisions taken by the plan", the fold-in records) — this record is the consolidated index of them.',
+      '- Resolve every "pending owner" marker in the text: where the owner answered, it already says so; where',
+      '  the recommended option stood because the owner was not asked, replace the marker with',
+      '  "(recommended option; owner not asked — see Decision record #N)". No "pending" may remain.',
+      '- Do not change any decision, any code block or any line range. If a decision in the list contradicts',
+      '  what the document says, do NOT reconcile it silently: note the contradiction in the record\'s row.',
+      '- Commit the touched document(s) in ONE commit. ' + COMMIT_RULES,
+    ].join('\n'),
+    { label: 'decision-record', phase: 'Plan review', model: CODER, effort: EFFORT, schema: FOLD_SCHEMA }
+  )
+  documents.decision_record = { entries: record, commit_sha: recorded ? recorded.commit_sha : null, summary: recorded ? recorded.summary : 'recorder returned nothing' }
+  log('decision record: ' + record.length + ' decision(s) written into ' + targets.join(' and ') + (recorded && recorded.commit_sha ? ' @ ' + recorded.commit_sha.slice(0, 8) : ' (NOT committed — report this)'))
 }
 
 // ---------------------------------------------------------------------------

@@ -20,7 +20,13 @@ pass leaves standing is yours to close by hand, not a second round's.
 
 Every document the engine writes is **committed on the branch** as it goes, in the
 repo's own naming (`docs/specs/YYYY-MM-DD-<slug>.md` and `docs/plans/…` unless Recon
-finds a different convention or you pass `specDir` / `plansDir`). Each gets one
+finds a different convention or you pass `specDir` / `plansDir`), and the branch is what
+you merge — so the final spec and plan land on the trunk with the code. Before the first
+line of code, a recorder writes a **"## Decision record"** into both documents: one
+table of every decision behind the build — the spec writer's, the plan writer's, each
+fold-in's, and the owner's answers — numbered, with who took it and why, and resolves
+every "pending owner" marker. `documents.decision_record.commit_sha` is that commit; if
+it is null the record was not committed, and you say so. Each gets one
 adversarial review round (`docRounds`) by an Opus reviewer that must bring evidence —
 for a plan, that means opening every cited line range, compiling every code block and,
 where cheap, splicing a task into a scratch worktree — and one fold-in pass by an Opus
@@ -233,8 +239,10 @@ describing it as a failed build.
 
 Otherwise the return value is structured. Report these, and in this order:
 
-0. **`documents.decisions`** — every decision the spec or plan writer took because
-   there was no owner to ask, with its question and reason; and `documents.spec_path`
+0. **`documents.decisions`** — every decision behind the build, whoever took it: the
+   spec writer's, the plan writer's, and the owner's answers; the same list is the
+   "## Decision record" section committed into both documents
+   (`documents.decision_record`); and `documents.spec_path`
    / `documents.plan_path`, committed on the branch, plus each document's reviews and
    fold-ins (`spec_reviews`, `plan_reviews`: findings, what was folded, what was
    refuted and why). Report the decisions **before** anything about the code — a
