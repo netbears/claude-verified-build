@@ -293,7 +293,8 @@ const PLAN_SCHEMA = {
         },
       },
     },
-    uncovered: { type: 'array', items: { type: 'string' }, description: 'Any part of the task NOT covered by a slice, and why.' },
+    uncovered: { type: 'array', items: { type: 'string' }, description: 'ONLY task scope that no slice delivers, one entry per dropped item, with why. Empty when everything is covered. Never a note, a caveat or a statement that nothing was dropped: any entry here makes the run not ok.' },
+    notes: { type: 'array', items: { type: 'string' }, description: 'Anything else the orchestrator should know: cross-slice dependencies no file overlap serialises, what the task itself puts outside every slice (a deploy, a final full-suite run), how tasks were merged. Informational only.' },
   },
 }
 
@@ -1483,7 +1484,9 @@ const plan = await callAgent(
       'correctness is legible in the diff, and note in shared_context that review is the only gate.'),
     '',
     'If some part of the task cannot be sliced or you deliberately left it out, list it in `uncovered`. Do not',
-    'silently drop scope — an honest gap is useful, a hidden one is not.',
+    'silently drop scope — an honest gap is useful, a hidden one is not. `uncovered` is read mechanically: any',
+    'entry there makes the run not ok, so it holds ONLY dropped scope — never a caveat, a dependency note or a',
+    'sentence saying nothing was dropped. Everything of that kind goes in `notes`.',
     '',
     'Write no code. Make no commits.',
   ].join('\n'),
@@ -1504,6 +1507,7 @@ const TASK_BRIEF = String(plan.task_summary || '').trim() || TASK
 // quietly different the moment it does not.
 const DIFF_CMD = 'git diff ' + BASE + '..HEAD'
 
+if (plan.notes && plan.notes.length) log('planner notes: ' + plan.notes.join(' | '))
 if (plan.uncovered && plan.uncovered.length) {
   log('planner left uncovered: ' + plan.uncovered.join(' | '))
 }
@@ -1575,7 +1579,7 @@ if (!APPROVE_ESTIMATE && !withinCeiling) {
       'proceed. On yes, relaunch this workflow with the SAME script and resumeFromRunId, and args identical plus ' +
       'approveEstimate:true (or maxUsd:<their ceiling>). Every agent before this gate replays from cache. On no, stop: the ' +
       'documents are committed on the branch and nothing has been implemented.',
-    plan: { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [] },
+    plan: { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [], notes: plan.notes || [] },
     documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null },
     recon: recon,
   }
@@ -1594,7 +1598,7 @@ function outOfBudget(stage, extra) {
   log('stopping before ' + stage + ': ' + Math.round(budget.remaining() / 1000) + 'k tokens left in the turn\'s budget')
   return { ok: false, stage: stage, error: 'token budget nearly exhausted before ' + stage + ' (' + Math.round(budget.remaining() / 1000) + 'k left); nothing past this point ran',
     base_sha: BASE, diff_command: DIFF_CMD, recon: recon, documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null },
-    plan: { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [] },
+    plan: { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [], notes: plan.notes || [] },
     lane_errors: laneErrors, ...(extra || {}) }
 }
 if (!budgetLeft(60000)) return outOfBudget('implement')
@@ -2002,7 +2006,7 @@ return {
     // tier. A verdict from a fallback lane is still a verdict, but say which model gave it.
     fallbacks: { enabled: FALLBACK, coder: CODER_FALLBACK, judge: JUDGE_FALLBACK, used: fallbacksUsed },
   },
-  plan: { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [] },
+  plan: { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [], notes: plan.notes || [] },
   // The implementers' own reports, unjudged: the adversary's findings are the verdict on them.
   implementation: implReports,
   // Slices the runtime dropped before an implementer ran, and slices whose implementer

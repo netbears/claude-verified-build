@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.4.2 — 2026-09-12
+
+**The slicer has a `notes` field, so `uncovered` holds only dropped scope.** On the 2026-09-12
+run the slicer wrote four explanatory paragraphs into `uncovered` — the first of them "Nothing in
+the plan's 23 tasks is dropped" — and the engine, which reads that array mechanically, reported
+`ok:false` with "the slicer left scope uncovered" over a build that had covered everything. The
+schema and the prompt now say that any `uncovered` entry makes the run not ok and that caveats,
+cross-slice dependencies and things the task itself keeps outside every slice go in `notes`,
+which is logged and returned as `plan.notes`. One test.
+
 ## v1.4.1 — 2026-09-12
 
 **The engine no longer reads the wall clock.** The Workflow runtime forbids `Date.now()`,

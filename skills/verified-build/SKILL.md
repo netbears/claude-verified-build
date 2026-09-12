@@ -381,7 +381,9 @@ Otherwise the return value is structured. Report these, and in this order:
    and a clean verdict is a run where something was judged by fewer eyes than designed;
    say which.
 5. **`plan.uncovered`** — scope the planner admitted dropping up front; it makes the
-   run `ok:false` because the task was not built in full.
+   run `ok:false` because the task was not built in full. **`plan.notes`** (since v1.4.2) is
+   the planner's informational list — dependencies, what the task keeps outside every slice —
+   and never affects `ok`; read it, do not report it as a gap.
    Also glance at **`plan.groups`** vs **`plan.largest_group`**: a `largest_group`
    equal to the slice count means every slice's declared files overlapped
    transitively, so the run was fully sequential. That is slow, not broken — every

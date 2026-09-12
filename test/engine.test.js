@@ -375,6 +375,15 @@ test('a review that did not read the diff cannot make the run ok', async () => {
   assert.ok(out.not_ok.some((r) => /diff/.test(r)), out.not_ok.join(' | '))
 })
 
+test('the slicer\'s notes are surfaced on plan.notes and never make the run not ok', async () => {
+  const notes = ['s4 depends on s3\'s module', 'make deploy is outside every slice by the task\'s own instruction']
+  const { out, logs } = await run({ ...BASE_ARGS, approveEstimate: true }, { slice: { shared_context: 'ctx', task_summary: 'brief', slices: SLICES, uncovered: [], notes } })
+  assert.equal(out.ok, true)
+  assert.deepEqual(out.plan.notes, notes)
+  assert.deepEqual(out.plan.uncovered, [])
+  assert.ok(logs.some((l) => /planner notes: s4 depends/.test(l)))
+})
+
 test('scope the slicer left uncovered makes the run not ok', async () => {
   const { out } = await run({ ...BASE_ARGS, approveEstimate: true }, { slice: { shared_context: 'ctx', task_summary: 'brief', slices: SLICES, uncovered: ['the docs'] } })
   assert.equal(out.ok, false)
