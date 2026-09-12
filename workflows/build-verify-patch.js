@@ -126,8 +126,15 @@ const fallbacksUsed = []
 // phase table in the skill was reconstructed from transcripts by hand; this makes the
 // next run report it, so the question "which stage is slow" has an answer in the result.
 const laneTimings = []
-const RUN_T0 = Date.now()
-function elapsed(t0) { return Math.round((Date.now() - t0) / 1000) }
+// The Workflow runtime forbids the wall clock in a script (a script must replay identically
+// on resume) and since 2026-09-12 rejects the script text statically before it runs. The
+// monotonic clock is the one it leaves; where the sandbox has none, a lane's seconds are
+// null, timingByPhase skips them, and the run is otherwise unaffected.
+function clock() {
+  try { return (typeof performance !== 'undefined' && typeof performance.now === 'function') ? performance.now() : null } catch (e) { return null }
+}
+const RUN_T0 = clock()
+function elapsed(t0) { const n = clock(); return (n == null || t0 == null) ? null : Math.round((n - t0) / 1000) }
 
 function fallbackFor(model) {
   if (model === CODER) return CODER_FALLBACK
@@ -141,13 +148,13 @@ function fallbackFor(model) {
 // level it aborted the run with no report. Every failure now lands in laneErrors and
 // the lane returns null, which every caller already handles.
 async function callAgent(prompt, opts) {
-  const t0 = Date.now()
+  const t0 = clock()
   try { return await callAgentInner(prompt, opts) }
   finally {
     const o = opts || {}
     const secs = elapsed(t0)
     laneTimings.push({ label: o.label || 'agent', phase: o.phase || null, model: o.model || null, seconds: secs })
-    log((o.label || 'agent') + ': ' + secs + 's (run at +' + elapsed(RUN_T0) + 's)')
+    log((o.label || 'agent') + ': ' + (secs == null ? '?' : secs + 's') + ' (run at +' + (elapsed(RUN_T0) == null ? '?' : elapsed(RUN_T0) + 's') + ')')
   }
 }
 

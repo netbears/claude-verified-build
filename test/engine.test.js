@@ -404,6 +404,27 @@ test('the result reports wall clock for the run and agent-seconds per phase, one
   assert.deepEqual(timed, labels.filter((l) => !l.startsWith('probe:')), 'every lane through callAgent is timed')
 })
 
+test('a sandbox with no clock still completes the run: lane seconds are null and the phase sums stay finite', async () => {
+  const saved = globalThis.performance
+  Object.defineProperty(globalThis, 'performance', { value: undefined, configurable: true, writable: true })
+  try {
+    const { out } = await run({ ...BASE_ARGS, approveEstimate: true })
+    assert.equal(out.ok, true)
+    assert.equal(out.timing.run_wall_clock_seconds, null)
+    assert.ok(out.timing.lanes.length > 0 && out.timing.lanes.every((t) => t.seconds === null))
+    assert.ok(Object.values(out.timing.agent_seconds_by_phase).every((v) => Number.isFinite(v)))
+  } finally {
+    Object.defineProperty(globalThis, 'performance', { value: saved, configurable: true, writable: true })
+  }
+})
+
+test('the engine never reads the wall clock or randomness: the Workflow runtime rejects the script text statically', () => {
+  const src = SRC
+  for (const bad of ['Date.now(', 'new Date()', 'Math.random(']) {
+    assert.ok(!src.includes(bad), bad + ' must not appear in the engine')
+  }
+})
+
 // ---------------------------------------------------------------------------
 // The shared tree: what the prompts must say, and what runs beside what.
 // ---------------------------------------------------------------------------

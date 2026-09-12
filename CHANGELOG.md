@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.4.1 — 2026-09-12
+
+**The engine no longer reads the wall clock.** The Workflow runtime forbids `Date.now()`,
+argless `new Date()` and `Math.random()` in a script (a script must replay identically on
+resume) and now rejects the script text statically, before Recon runs: a launch on
+2026-09-12 died in 18 ms with "Date.now() / new Date() are unavailable in workflow scripts".
+Lane timing used `Date.now()` in three places. It now uses `performance.now()` where the
+sandbox exposes it and reports `null` seconds where it does not — the sandbox exposes no
+clock at all today (probed 2026-09-12: `performance` undefined, no `process.hrtime`), so
+`timing.run_wall_clock_seconds` and every lane's `seconds` come back `null` in a real run
+and `agent_seconds_by_phase` sums to zero; the per-run wall clock is in the task
+notification's `duration_ms` instead. Two tests: a run with no clock still completes with
+finite phase sums, and the engine text contains none of the three forbidden calls.
+
 ## v1.4.0 — 2026-09-12
 
 **The front half, measured and trimmed.** One full run on 2026-09-11 (five slices, one owner

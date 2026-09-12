@@ -401,6 +401,10 @@ Otherwise the return value is structured. Report these, and in this order:
 8. **`timing`** — `run_wall_clock_seconds` for the run, `agent_seconds_by_phase` (lanes
    that ran in parallel are summed, so a phase can exceed the wall clock), and one entry
    per lane. Report the phase split in one line; it is the evidence for the next cut.
+   Since v1.4.1 the engine may not read the wall clock (the runtime rejects the script
+   otherwise) and the sandbox exposes no monotonic clock either, so expect every figure
+   here to be `null`; the run's wall clock is the task notification's `duration_ms`, and
+   per-lane time is in the agent transcripts' timestamps.
 9. **`models.fallbacks.used`** — lanes whose primary model returned nothing and were
    re-run once on the fallback tier (`label`, `primary`, `fallback` per entry). Say
    which verdicts came from the fallback model: "reviewed by Fable because Opus was
