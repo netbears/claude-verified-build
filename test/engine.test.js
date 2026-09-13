@@ -210,11 +210,24 @@ test('an implementer that throws is a recorded lane error, not a dropped group, 
   assert.ok(labels.includes('adversary:r0'), 'the adversary still reviews what did land')
 })
 
+test('sonnet writes the spec and the plan, opus reviews both, and a lost writer falls back to opus', async () => {
+  const { out, calls } = await run(BASE_ARGS, { spec: (label) => (label.endsWith(':fb-opus') ? table().spec : null) })
+  const modelOf = (l) => calls.find((c) => c.label === l).model
+  assert.equal(modelOf('spec'), 'sonnet')
+  assert.equal(modelOf('spec:fb-opus'), 'opus')
+  assert.equal(modelOf('spec-review:r1'), 'opus')
+  assert.equal(modelOf('plan-doc'), 'sonnet')
+  assert.equal(modelOf('plan-review:r1'), 'opus')
+  assert.equal(out.estimate.breakdown['done:spec'].model, 'sonnet')
+  assert.equal(out.estimate.breakdown['done:plan_doc'].model, 'sonnet')
+})
+
 test('a fallback lane is recorded and its label carries the tier', async () => {
   const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true }, { 'adversary:r0': (label) => (label.endsWith(':fb-fable') ? table()['adversary:r0'] : null) })
   assert.equal(out.ok, true)
   assert.ok(labels.includes('adversary:r0:fb-fable'))
   assert.deepEqual(out.models.fallbacks.used, [{ label: 'adversary:r0', primary: 'opus', fallback: 'fable' }])
+  assert.deepEqual([out.models.spec, out.models.plan, out.models.doc_review], ['sonnet', 'sonnet', 'opus'])
   assert.equal(out.lane_errors.length, 1)
 })
 

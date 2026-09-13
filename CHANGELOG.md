@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.5.0 — 2026-09-13
+
+**Sonnet writes the spec and the plan; Opus still reviews both.** The spec writer and the
+plan writer move from `opus` to `sonnet`. The spec review and the plan review (each still
+folding its own findings in), the owner-answer authors, the slicer, the adversary and the
+re-review stay on Opus. Every document a writer commits is attacked by an Opus reviewer that
+must bring evidence before anything is built, so the writer need not be the judge; the plan
+writer was 16.8 of the front half's 92 minutes on the 2026-09-11 run, and its re-reads now
+bill at the Sonnet rate. A writer that returns nothing retries on Opus (`coderFallback`),
+like the other Sonnet lanes. The cost gate prices the `spec` and `plan_doc` rows at Sonnet
+(still `measured:false`), and `models` in the result names `spec`, `plan` and `doc_review`.
+One test.
+
 ## v1.4.2 — 2026-09-12
 
 **The slicer has a `notes` field, so `uncovered` holds only dropped scope.** On the 2026-09-12

@@ -1,13 +1,13 @@
 export const meta = {
   name: 'build-verify-patch',
-  description: 'From an idea: Opus writes the spec and a second Opus reviews and folds it in; the same for the plan; then Sonnet implements in waves of 15, Opus adversarially reviews the combined diff and re-runs the repo\'s check, and one patch round closes critical/major findings',
+  description: 'From an idea: Sonnet writes the spec and Opus reviews and folds it in; the same for the plan; then Sonnet implements in waves of 15, Opus adversarially reviews the combined diff and re-runs the repo\'s check, and one patch round closes critical/major findings',
   whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix.',
   phases: [
     { title: 'Probe', detail: 'one trivial call per model: are sonnet and opus enabled for this account?' },
     { title: 'Recon', detail: 'sonnet reads the repo: git state, ecosystem, how it verifies itself', model: 'sonnet' },
-    { title: 'Spec', detail: 'opus turns the idea into a spec (brainstorming doctrine), commits it', model: 'opus' },
+    { title: 'Spec', detail: 'sonnet turns the idea into a spec (brainstorming doctrine), commits it', model: 'sonnet' },
     { title: 'Spec review', detail: 'opus adversarially reviews the spec, then folds its own findings in', model: 'opus' },
-    { title: 'Plan', detail: 'opus writes the implementation plan from the spec (writing-plans doctrine), commits it', model: 'opus' },
+    { title: 'Plan', detail: 'sonnet writes the implementation plan from the spec (writing-plans doctrine), commits it', model: 'sonnet' },
     { title: 'Plan review', detail: 'opus adversarially reviews the plan against the tree (reading and compiling, never running the tests), then folds its own findings in', model: 'opus' },
     { title: 'Slice', detail: 'opus maps the plan\'s tasks onto file-disjoint slices', model: 'opus' },
     { title: 'Implement', detail: 'sonnet writes and commits each slice', model: 'sonnet' },
@@ -827,9 +827,9 @@ const PROFILE = {
   implement: { model: CODER, cache: 13.0, write: 0.17, out: 0.025, measured: true },   // per slice
   review: { model: JUDGE, cache: 17.0, write: 0.45, out: 0.011, measured: true },      // per adversarial pass (now also runs the check)
   patch: { model: CODER, cache: 12.0, write: 0.08, out: 0.030, measured: true },       // per patched finding
-  spec: { model: JUDGE, cache: 10.0, write: 0.3, out: 0.030, measured: false },
+  spec: { model: CODER, cache: 10.0, write: 0.3, out: 0.030, measured: false },          // on Sonnet since v1.5.0
   doc_review: { model: JUDGE, cache: 18.0, write: 0.4, out: 0.035, measured: false },   // reviews AND folds in (spec 7.6+4.7M / plan 19+6.5M cache measured as two lanes on 2026-09-11)
-  plan_doc: { model: JUDGE, cache: 20.0, write: 0.4, out: 0.060, measured: false },
+  plan_doc: { model: CODER, cache: 20.0, write: 0.4, out: 0.060, measured: false },      // on Sonnet since v1.5.0
   plan_review: { model: JUDGE, cache: 25.0, write: 0.4, out: 0.020, measured: false },
   answers: { model: JUDGE, cache: 8.0, write: 0.2, out: 0.015, measured: false },
   plan_index: { model: CODER, cache: 1.5, write: 0.05, out: 0.003, measured: false },
@@ -1300,7 +1300,7 @@ if (FROM === 'idea') {
         '  decision, marked "(recommended option; owner not asked)" — never "pending owner".'),
       '- ' + COMMIT_RULES,
     ].join('\n'),
-    { label: 'spec', phase: 'Spec', model: JUDGE, effort: EFFORT, schema: SPEC_SCHEMA }
+    { label: 'spec', phase: 'Spec', model: CODER, effort: EFFORT, schema: SPEC_SCHEMA }
   )
   if (!spec) return { ok: false, stage: 'spec', error: 'the spec writer returned nothing', recon }
   SPEC_PATH = spec.path
@@ -1372,7 +1372,7 @@ if (FROM === 'idea' || FROM === 'spec') {
         '  `open_questions` with your recommendation, but write the recommended option into the document as the\n' +
         '  decision, marked "(recommended option; owner not asked)" — never "pending owner".'),
     ].join('\n'),
-    { label: 'plan-doc', phase: 'Plan', model: JUDGE, effort: EFFORT, schema: PLANDOC_SCHEMA }
+    { label: 'plan-doc', phase: 'Plan', model: CODER, effort: EFFORT, schema: PLANDOC_SCHEMA }
   )
   if (!planDoc) return { ok: false, stage: 'plan', error: 'the plan writer returned nothing', recon, documents }
   PLAN_PATH = planDoc.path
@@ -2001,7 +2001,7 @@ return {
   // writer took because there was no owner to ask.
   documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null, doc_rounds: DOC_ROUNDS, pause_for_owner: PAUSE_FOR_OWNER },
   models: {
-    implement: CODER, review: JUDGE, effort: EFFORT, max_concurrent: WAVE,
+    spec: CODER, plan: CODER, doc_review: JUDGE, implement: CODER, review: JUDGE, effort: EFFORT, max_concurrent: WAVE,
     // Lanes whose primary model returned nothing and were re-run once on the other
     // tier. A verdict from a fallback lane is still a verdict, but say which model gave it.
     fallbacks: { enabled: FALLBACK, coder: CODER_FALLBACK, judge: JUDGE_FALLBACK, used: fallbacksUsed },

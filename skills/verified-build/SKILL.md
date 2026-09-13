@@ -1,11 +1,11 @@
 ---
 name: verified-build
-description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Opus writes the spec and a second Opus adversarially reviews it and folds its findings in, then the same for the implementation plan; then Sonnet writes the code in parallel waves of 15, Opus adversarially reviews the combined diff and re-runs the repo's check command, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
+description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Sonnet writes the spec and Opus adversarially reviews it and folds its findings in, then the same for the implementation plan; then Sonnet writes the code in parallel waves of 15, Opus adversarially reviews the combined diff and re-runs the repo's check command, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
 ---
 
 # /verified-build — spec it, plan it, write it cheap, then attack it
 
-Opus writes the spec and attacks it. Opus writes the plan and attacks it. Sonnet
+Sonnet writes the spec; Opus attacks it. Sonnet writes the plan; Opus attacks it. Sonnet
 implements. Opus attacks the whole diff and re-runs the check. Sonnet patches what
 matters. Opus re-attacks.
 Nothing is called done because the model that wrote it said so — and what the last
@@ -240,8 +240,8 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `allowDirty` | `false` | run despite a dirty tree — only when those changes are genuinely part of the task |
 | `allowTrunk` | `false` | run on the shared trunk. Almost always the wrong answer; branch instead |
 | `fallback` | `true` | retry a lane once on the other tier when its primary model returns nothing (terminal API error such as `529 Overloaded`). `false` disables |
-| `judgeFallback` | `fable` | model the Opus judge lanes (spec and plan writers, document reviewers, slicer, adversary) retry on |
-| `coderFallback` | `opus` | model the Sonnet lanes (recon, implement, patch) retry on |
+| `judgeFallback` | `fable` | model the Opus judge lanes (document reviewers, owner-answer authors, slicer, adversary) retry on |
+| `coderFallback` | `opus` | model the Sonnet lanes (recon, spec and plan writers, implement, patch) retry on |
 
 Pass a plain string instead of an object and it is taken as `task`.
 
@@ -494,15 +494,15 @@ every closed-vocabulary guard in the smoke set.
 ## Why these models, and what it costs
 
 The models are **pinned in the workflow, not inherited from your session**: Sonnet
-implements, Opus judges, and Fable runs only as a fallback. That is a measured cost
+writes the spec and the plan and implements, Opus judges, and Fable runs only as a fallback. That is a measured cost
 decision, not a preference, and it is the reason this pattern beats doing the same work
 by hand.
 
 **Fallback tiers.** `agent()` returns nothing when a subagent dies on a terminal API
 error after the runtime's own retries — a `529 Overloaded` storm, typically — and a
 an adversary that returned nothing is a diff nobody reviewed. So every lane retries **once**
-on the other tier: the Opus judge lanes (writers, document reviewers, slicer, adversary) fall back
-to Fable, and the Sonnet lanes (recon, implement, patch) fall back to Opus. The retry is
+on the other tier: the Opus judge lanes (document reviewers, owner-answer authors, slicer, adversary)
+fall back to Fable, and the Sonnet lanes (recon, spec and plan writers, implement, patch) fall back to Opus. The retry is
 a separate agent with a `:fb-<model>` label, it is recorded in `models.fallbacks.used`,
 and the run logs it at the end. It exists because on 2026-09-03 Opus was overloaded for
 about ninety minutes, every judge lane returned null, and the run reported `ok:true`
@@ -528,7 +528,12 @@ with the invocation's argument words, so `$1.00` would render as garbage.)
 
 The implement lane is where the volume is — read, edit, run tests, re-read — so it
 goes on Sonnet, making those re-reads 5x cheaper than Fable and 2.5x cheaper than
-Opus. The judge lanes are low-volume and high-consequence, so they get Opus. Recon is
+Opus. The judge lanes are low-volume and high-consequence, so they get Opus. Since
+v1.5.0 the spec and plan writers are on Sonnet as well: each document is followed by an
+Opus reviewer that must bring evidence and folds in what survives, so a draft's miss is
+caught by a judge before anything is built, while the writers' long read-and-write
+sessions bill at the Sonnet rate (the plan writer alone was 16.8 of the front half's 92
+minutes on the 2026-09-11 run). Recon is
 on Sonnet too: it is mechanical discovery, and it *saves* money by establishing facts
 once that every later agent would otherwise pay to rediscover.
 

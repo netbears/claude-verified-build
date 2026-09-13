@@ -4,7 +4,7 @@ A Claude Code skill and the saved Workflow it drives: from an idea, a spec or a 
 adversarially reviewed code, with the owner asked only the questions that are theirs
 and told the cost before a line of code is written.
 
-**Opus writes the spec; a second Opus attacks it and mends what held. The same for the
+**Sonnet writes the spec; Opus attacks it and mends what held. The same for the
 plan. Sonnet implements. Opus attacks the whole diff and re-runs the repo's check command.
 Sonnet patches what matters. Opus re-attacks.** Nothing is called done because the model
 that wrote it said so, and what the last pass leaves standing is closed by hand, at every
@@ -19,12 +19,12 @@ Works on any git repo in any language: the first agent discovers from the repo i
 flowchart TD
     I([idea · spec · plan]) --> PB[Probe<br/>one tool-free call each to sonnet and opus: usable from this account?]
     PB --> R[Recon<br/><i>sonnet</i>: git state, ecosystem, the one check command — run once, time-capped — today's date]
-    R --> S[Spec<br/><i>opus</i>: brainstorming doctrine → docs/specs/…md, committed]
+    R --> S[Spec<br/><i>sonnet</i>: brainstorming doctrine → docs/specs/…md, committed]
     S --> SR[Spec review<br/><i>opus</i> attacks with evidence, then folds in what survives re-verification]
     SR --> Q1{owner<br/>questions?}
     Q1 -- yes --> P1[[pause · ask the owner · resume with answers]]
     Q1 -- no --> P
-    P1 --> P[Plan<br/><i>opus</i>: writing-plans doctrine → docs/plans/…md, committed]
+    P1 --> P[Plan<br/><i>sonnet</i>: writing-plans doctrine → docs/plans/…md, committed]
     P --> PR[Plan review<br/><i>opus</i> opens every line range, compiles every block, greps every fixture — runs no tests — then folds in]
     PR --> Q2{owner<br/>questions?}
     Q2 -- yes --> P2[[pause · ask · resume]]
@@ -47,9 +47,9 @@ flowchart TD
 |---|---|---|---|
 | Probe | both | one trivial answer per pinned model | a model this account cannot use → stop, for cents |
 | Recon | Sonnet | git state, ecosystem, the one check command (the fastest real one, run once under a time cap), today's date, the docs convention | not a repo, dirty tree or the trunk → stop |
-| Spec | Opus | `docs/specs/YYYY-MM-DD-<slug>.md`, committed; small decisions recorded, big ones escalated | |
+| Spec | Sonnet | `docs/specs/YYYY-MM-DD-<slug>.md`, committed; small decisions recorded, big ones escalated | |
 | Spec review | Opus | findings with evidence; the same lane folds in what survives its re-verification and withdraws the rest, with evidence | unanswered owner questions → **pause** |
-| Plan | Opus | `docs/plans/YYYY-MM-DD-<slug>.md`, committed; one task per future slice, real code, measured line ranges | |
+| Plan | Sonnet | `docs/plans/YYYY-MM-DD-<slug>.md`, committed; one task per future slice, real code, measured line ranges | |
 | Plan review | Opus | line ranges opened, code blocks compiled, fixtures and signatures grepped — no tests run, no worktree; then the fold-in | unanswered owner questions → **pause** |
 | Slice | Opus | one task = one slice, pointers not pastes, chains longer than four merged | |
 | Cost gate | — | spent so far, ahead with a low–high band, total, at API list prices | **pause** until approved |
@@ -142,8 +142,8 @@ them waiting for the owner, 150 with agents active — and 92 of those 150 in th
 | Phase | Minutes | Since |
 |---|---|---|
 | Recon | 7.4 (half of it babysitting the full test suite) | v1.4.0: one check, once, time-capped |
-| Spec, spec review, fold-in | 9.4, 8.4, 9.3 | v1.4.0: review and fold-in are one lane |
-| Plan, plan review, fold-in | 16.8, 22.4 (tasks spliced into a worktree), 7.1 | v1.4.0: reads and compiles, runs no tests; one lane |
+| Spec, spec review, fold-in | 9.4, 8.4, 9.3 | v1.4.0: review and fold-in are one lane; v1.5.0: the writer on Sonnet |
+| Plan, plan review, fold-in | 16.8, 22.4 (tasks spliced into a worktree), 7.1 | v1.4.0: reads and compiles, runs no tests; one lane; v1.5.0: the writer on Sonnet |
 | Decision record, plan index | 5.8, 0.4 | v1.4.0: the recorder is gone |
 | Slice | 2.2 | |
 | Implement | 12.7 | |
