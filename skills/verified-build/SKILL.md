@@ -15,7 +15,7 @@ pass leaves standing is yours to close by hand, not a second round's.
 
 | `from` | `task` is | the engine does |
 |---|---|---|
-| `idea` (default) | a paragraph, a prompt, a failing test, a one-line idea | spec → spec review (folds in) → plan → plan review (folds in) → slice → build |
+| `idea` (default) | a paragraph, a prompt, a failing test, a one-line idea | recon maps where it lands and asks the owner's questions first → spec → spec review (folds in) → plan → plan review (folds in) → slice → build |
 | `spec` | a finished spec: its path, or its text | plan → plan review (folds in) → slice → build |
 | `plan` | a finished, already-reviewed plan: its path, or its text | slice → build |
 
@@ -62,6 +62,16 @@ fully autonomous again; the recommended option then stands. Every decision, take
 answered, comes back as `documents.decisions` and is the **first thing you report**.
 The plan may not silently reverse one, and a review finding that would is withdrawn on
 that ground.
+
+**The first questions are asked before the spec exists** (since v1.6.0). From an idea,
+Recon — which reads the repo anyway — also reports where the idea lands (`touchpoints`:
+the files and measured line ranges the spec will have to read or change, and why) and
+the owner questions a careful colleague would put before designing. Those questions
+pause the run at `stage:'idea'` (no document yet), and the spec writer then starts from
+the map and the answers: it writes them into "Decisions taken by the owner" itself, so
+no answers lane runs for them, and the reviewer has no provisional decision to fold
+around. The spec and plan writers and reviewers still raise the questions that only
+emerge during design, exactly as before.
 
 The stages carry the superpowers skills' doctrine, copied into the engine so the pair
 stays self-contained (MIT, Jesse Vincent): brainstorming for the spec writer,
@@ -240,7 +250,7 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `approveEstimate` | `false` | pass `true` on the resume after the cost gate to start implementing |
 | `maxUsd` | — | a ceiling in USD at API list prices; the cost gate passes without pausing when the expected total is within it |
 | `prices` | list prices cached 2026-06-24 | override `{sonnet, opus, fable}` × `{in, out, cache_read, cache_write}` USD per million tokens; merged per field, so `{sonnet:{in:3}}` changes one number |
-| `answers` | — | `[{id, answer}]` for the questions a paused run returned (ids look like `spec:Q1`); pass on the resume, keeping earlier answers; order does not matter |
+| `answers` | — | `[{id, answer}]` for the questions a paused run returned (ids look like `idea:Q1`, `spec:Q1`, `plan:Q1`); pass on the resume, keeping earlier answers; order does not matter |
 | `probeModels` | `true` | one trivial call per primary model before Recon; `ok:false, stage:'probe'` names a model this account cannot use. `false` skips it |
 | `testCmd` | discovered by Recon | exact command every lane runs; overrides discovery, and Recon's "nothing executable" |
 | `wave` | `15` | max agents live at once: parallel groups while implementing and patching (capped at 16, and by the runtime's own `min(16, cpus-2)`) |
@@ -259,8 +269,9 @@ Pass a plain string instead of an object and it is taken as `task`.
 ## When the run pauses with questions
 
 A result with `paused:true` is not a finished run and not a failure. It carries
-`stage` (`spec` or `plan`), `document` (the committed file, complete with the
-recommended options as provisional decisions), and `questions`, each with `question`,
+`stage` (`idea`, `spec` or `plan`), `document` (the committed file, complete with the
+recommended options as provisional decisions; `null` at the `idea` stage, where Recon
+asked before any document was written), and `questions`, each with `question`,
 `options[].label` / `consequence`, `recommended` and `why`.
 
 Do this, in order, without editing the document yourself:
@@ -275,8 +286,8 @@ Do this, in order, without editing the document yourself:
    [ …answers_so_far, {id, answer} for every question ] } })`. Same script, same task,
    same knobs — only `answers` differs. Every agent before the pause replays from cache
    at no cost; an author then records the owner's decisions in the document, commits,
-   and the run continues. A run can pause twice (once for the spec, once for the plan);
-   keep the spec answers in the list when you resume after the plan's pause.
+   and the run continues. A run can pause three times for questions (before the spec,
+   after the spec, after the plan); keep every earlier answer in the list on each resume.
 3. If the user cannot answer now, stop there and say so: the document is committed on
    the branch with the recommended options marked pending, and the run resumes later
    from the same run id in this session. Do not pass `pauseForOwner:false` to get past

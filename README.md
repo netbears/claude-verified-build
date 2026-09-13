@@ -18,8 +18,11 @@ Works on any git repo in any language: the first agent discovers from the repo i
 ```mermaid
 flowchart TD
     I([idea · spec · plan]) --> PB[Probe<br/>one tool-free call each to sonnet and opus: usable from this account?]
-    PB --> R[Recon<br/><i>sonnet</i>: git state, ecosystem, the one check command — run once, time-capped — today's date]
-    R --> S[Spec<br/><i>sonnet</i>: brainstorming doctrine → docs/specs/…md, committed]
+    PB --> R[Recon<br/><i>sonnet</i>: git state, ecosystem, the one check command — run once, time-capped — today's date; from an idea, where it lands and what the owner must decide first]
+    R --> Q0{owner<br/>questions?}
+    Q0 -- yes --> P0[[pause · ask the owner · resume with answers]]
+    Q0 -- no --> S
+    P0 --> S[Spec<br/><i>sonnet</i>: brainstorming doctrine, from recon's map and the owner's answers → docs/specs/…md, committed]
     S --> SR[Spec review<br/><i>opus</i> attacks with evidence, then edits and commits the spec with what survives re-verification]
     SR --> Q1{owner<br/>questions?}
     Q1 -- yes --> P1[[pause · ask the owner · resume with answers]]
@@ -46,8 +49,8 @@ flowchart TD
 | Stage | Model | What it produces | Gate |
 |---|---|---|---|
 | Probe | both | one trivial answer per pinned model | a model this account cannot use → stop, for cents |
-| Recon | Sonnet | git state, ecosystem, the one check command (the fastest real one, run once under a time cap), today's date, the docs convention | not a repo, dirty tree or the trunk → stop |
-| Spec | Sonnet | `docs/specs/YYYY-MM-DD-<slug>.md`, committed; small decisions recorded, big ones escalated | |
+| Recon | Sonnet | git state, ecosystem, the one check command (the fastest real one, run once under a time cap), today's date, the docs convention; from an idea, the files and line ranges it lands on and the owner's questions | not a repo, dirty tree or the trunk → stop; unanswered owner questions → **pause** |
+| Spec | Sonnet | `docs/specs/YYYY-MM-DD-<slug>.md`, committed, written from Recon's map with the owner's answers already recorded; small decisions recorded, big ones escalated | |
 | Spec review | Opus | findings with evidence; the same lane edits the spec to fold in what survives its re-verification, withdraws the rest with evidence, and commits — proved by the commit's `git show --stat` | no new commit listing the spec, even after one editor lane → stop; unanswered owner questions → **pause** |
 | Plan | Sonnet | `docs/plans/YYYY-MM-DD-<slug>.md`, committed; one task per future slice, real code, measured line ranges | |
 | Plan review | Opus | line ranges opened, code blocks compiled, fixtures and signatures grepped — no tests run, no worktree; then the fold-in, edited and committed into the plan and proved the same way | no new commit listing the plan, even after one editor lane → stop; unanswered owner questions → **pause** |
@@ -74,7 +77,7 @@ patch diff. Every result carries `timing`: the run's wall clock, agent-seconds p
 and one entry per lane, so the next tuning argument starts from a number. The turn's token
 budget, where one is set, stops the run between phases with a partial report.
 
-Three pauses, all of the same shape: the run returns early with `paused:true`, the
+Four pauses, all of the same shape: the run returns early with `paused:true`, the
 orchestrator asks the user, and the same run resumes with the answer. No prompt before a
 pause mentions the answer, so every earlier agent replays from cache.
 
@@ -122,7 +125,7 @@ probes both for cents and stops with `stage:'probe'` if one is not.
 ```
 
 `from: idea | spec | plan` picks where the run starts; `idea` is the default. Read
-`SKILL.md` for the pre-flight, the arguments, the three pauses and how to report a result
+`SKILL.md` for the pre-flight, the arguments, the four pauses and how to report a result
 honestly: the decisions taken first, then the adversary's verdict, then the leftovers
 closed by hand, then the cost. The skill is the opt-in that permits the Workflow tool.
 
@@ -143,7 +146,7 @@ them waiting for the owner, 150 with agents active — and 92 of those 150 in th
 | Phase | Minutes | Since |
 |---|---|---|
 | Recon | 7.4 (half of it babysitting the full test suite) | v1.4.0: one check, once, time-capped |
-| Spec, spec review, fold-in | 9.4, 8.4, 9.3 | v1.4.0: review and fold-in are one lane; v1.5.0: the writer on Sonnet |
+| Spec, spec review, fold-in | 9.4, 8.4, 9.3 | v1.4.0: review and fold-in are one lane; v1.5.0: the writer on Sonnet; v1.6.0: the writer starts from Recon's map with the owner's answers in hand, and no answers lane runs for them |
 | Plan, plan review, fold-in | 16.8, 22.4 (tasks spliced into a worktree), 7.1 | v1.4.0: reads and compiles, runs no tests; one lane; v1.5.0: the writer on Sonnet |
 | Decision record, plan index | 5.8, 0.4 | v1.4.0: the recorder is gone |
 | Slice | 2.2 | |

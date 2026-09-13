@@ -187,6 +187,50 @@ test('an owner question pauses the spec stage; the resume records the answer and
   assert.match(auto.out.documents.decisions.find((d) => d.stage === 'spec' && /owner not asked/.test(d.decision)).decision, /^no/)
 })
 
+test('recon asks the owner before the spec is written; the writer gets the answers and no answers lane runs', async () => {
+  const q = { id: 'Q1', question: 'Keep the legacy endpoint?', options: [
+    { label: 'keep', consequence: 'two code paths' }, { label: 'drop', consequence: 'old clients break' }], recommended: 'keep', why: 'reversible' }
+  const withQ = { recon: { ...RECON, owner_questions: [q] } }
+  const p = await run(BASE_ARGS, withQ)
+  assert.equal(p.out.paused, true)
+  assert.equal(p.out.stage, 'idea')
+  assert.equal(p.out.document, null)
+  assert.deepEqual(p.out.questions.map((x) => x.id), ['idea:Q1'])
+  assert.ok(!p.labels.includes('spec'), 'the spec writer must not run before the owner answers')
+  const r = await run({ ...BASE_ARGS, answers: [{ id: 'idea:Q1', answer: 'drop' }] }, withQ)
+  assert.equal(r.out.stage, 'estimate')
+  assert.equal(r.calls.find((c) => c.label === 'recon').prompt, p.calls.find((c) => c.label === 'recon').prompt, 'recon replays from cache: its prompt never carries the answers')
+  const specPrompt = r.calls.find((c) => c.label === 'spec').prompt
+  assert.match(specPrompt, /OWNER HAS ALREADY ANSWERED/)
+  assert.match(specPrompt, /"answer": "drop"/)
+  assert.match(specPrompt, /Decisions taken by the owner/)
+  assert.ok(!r.labels.includes('spec-answers'), 'an answer given before the spec needs no author lane to record it')
+  assert.match(r.calls.find((c) => c.label === 'plan-doc').prompt, /"id": "idea:Q1"/)
+  assert.equal(r.out.documents.questions.find((x) => x.id === 'idea:Q1').answered, true)
+  const auto = await run({ ...BASE_ARGS, pauseForOwner: false }, withQ)
+  assert.equal(auto.out.stage, 'estimate')
+  assert.match(auto.calls.find((c) => c.label === 'spec').prompt, /OWNER WAS NOT ASKED[\s\S]*"recommended": "keep"/)
+  assert.match(auto.out.documents.decisions.find((d) => d.stage === 'idea').decision, /^keep/)
+})
+
+test('recon maps where the task lands and the spec writer starts from that map', async () => {
+  const touch = [{ path: 'src/a.js', lines: '10-20', why: 'the entry point the idea extends' }, { path: 'test/a.test.js', lines: '', why: 'covers it' }]
+  const { calls } = await run(BASE_ARGS, { recon: { ...RECON, touchpoints: touch } })
+  const reconPrompt = calls.find((c) => c.label === 'recon').prompt
+  assert.match(reconPrompt, /WHERE THE TASK LANDS/)
+  assert.match(reconPrompt, /owner_questions/)
+  const specPrompt = calls.find((c) => c.label === 'spec').prompt
+  assert.match(specPrompt, /WHERE THE TASK LANDS/)
+  assert.match(specPrompt, /- src\/a\.js:10-20 — the entry point the idea extends/)
+  assert.match(specPrompt, /- test\/a\.test\.js — covers it/)
+  const bare = await run(BASE_ARGS)
+  assert.doesNotMatch(bare.calls.find((c) => c.label === 'spec').prompt, /WHERE THE TASK LANDS/)
+  const fromSpec = await run({ task: 'docs/specs/2026-09-11-x.md', from: 'spec' }, { recon: { ...RECON, owner_questions: [{ id: 'Q1', question: 'x?', options: [
+    { label: 'a', consequence: 'c' }, { label: 'b', consequence: 'd' }], recommended: 'a', why: 'w' }] } })
+  assert.doesNotMatch(fromSpec.calls.find((c) => c.label === 'recon').prompt, /WHERE THE TASK LANDS/, 'a finished document needs no interview')
+  assert.equal(fromSpec.out.stage, 'estimate', 'recon questions are ignored when the run starts from a document')
+})
+
 test('the answers prompt is byte-identical whatever order the orchestrator passes the answers in', async () => {
   const withQ = { spec: { ...table().spec, open_questions: [
     { id: 'Q1', question: 'a?', options: [{ label: 'x', consequence: 'c' }, { label: 'y', consequence: 'd' }], recommended: 'x', why: 'w' },

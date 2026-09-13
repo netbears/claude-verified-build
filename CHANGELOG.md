@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.6.0 — 2026-09-13
+
+**The owner is asked before the spec is written, and the writer starts from a map.** On
+the 2026-09-11 run the spec stage was 27 of the front half's 92 minutes: the writer
+rediscovered where the idea lands, the reviewer re-read the same repo to check it, and an
+owner question raised by the writer meant a provisional decision the reviewer folded
+around, a pause after the review, and an Opus author lane to rewrite the document with the
+answer. From an idea, Recon — which reads the repo anyway — now also reports
+`touchpoints` (the files and `grep -n`-measured line ranges the spec will have to read or
+change, and why) and `owner_questions` (the money / risk / data / ownership / reversal
+questions a careful colleague would put before designing). Those questions pause the run
+at `stage:'idea'` with `document:null` before the spec writer runs; on the resume the
+writer gets the map and the answers, writes them into "Decisions taken by the owner"
+itself, and is told never to re-raise them; with `pauseForOwner:false` it is told the
+recommended option stands. No answers lane runs for an idea question, the plan writer
+sees the idea answers with the spec's, and Recon's prompt never carries the answers, so it
+replays from cache. The spec and plan writers and reviewers still raise the questions
+that only emerge during design, as before. Answer ids now look like `idea:Q1` as well as
+`spec:Q1` / `plan:Q1`. Two tests; the helpers test loads the question schema alongside
+Recon's, which now references it.
+
 ## v1.5.2 — 2026-09-13
 
 **SKILL.md matches the engine again.** Checked line by line against the engine. Recon's

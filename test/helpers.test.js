@@ -8,7 +8,7 @@ const H = loadHelpers([
   'severityRank', 'mergePrices', 'priceOf', 'lineCost', 'estimateRun',
   'namespaced', 'parseAnswers', 'collectForOrchestrator', 'looksLikePath',
   'footprintViolations', 'patchFootprint', 'judgeReview', 'timingByPhase',
-], { consts: ['DEFAULT_PRICES', 'RECON_SCHEMA'] })
+], { consts: ['DEFAULT_PRICES', 'QUESTION_ITEMS', 'RECON_SCHEMA'] })
 
 test('recon must report today as a YYYY-MM-DD date: required, with a pattern the runtime enforces', () => {
   assert.ok(H.RECON_SCHEMA.required.includes('today'))

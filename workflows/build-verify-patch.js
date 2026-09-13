@@ -4,8 +4,8 @@ export const meta = {
   whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix.',
   phases: [
     { title: 'Probe', detail: 'one trivial call per model: are sonnet and opus enabled for this account?' },
-    { title: 'Recon', detail: 'sonnet reads the repo: git state, ecosystem, how it verifies itself', model: 'sonnet' },
-    { title: 'Spec', detail: 'sonnet turns the idea into a spec (brainstorming doctrine), commits it', model: 'sonnet' },
+    { title: 'Recon', detail: 'sonnet reads the repo: git state, ecosystem, how it verifies itself, where the idea lands, what the owner must decide first', model: 'sonnet' },
+    { title: 'Spec', detail: 'sonnet turns the idea into a spec (brainstorming doctrine) from recon\'s map and the owner\'s answers, commits it', model: 'sonnet' },
     { title: 'Spec review', detail: 'opus adversarially reviews the spec, then folds its own findings in', model: 'opus' },
     { title: 'Plan', detail: 'sonnet writes the implementation plan from the spec (writing-plans doctrine), commits it', model: 'sonnet' },
     { title: 'Plan review', detail: 'opus adversarially reviews the plan against the tree (reading and compiling, never running the tests), then folds its own findings in', model: 'opus' },
@@ -227,6 +227,31 @@ const DISCOVERY_HINTS = [
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
+const QUESTION_ITEMS = {
+  type: 'array',
+  description: 'Decisions the OWNER should make, not you. Escalate only when the choice affects money, risk, data, ownership, reverses something that exists, or careful colleagues would decide it differently. Everything else you decide and record.',
+  items: {
+    type: 'object', additionalProperties: false,
+    required: ['id', 'question', 'options', 'recommended', 'why'],
+    properties: {
+      id: { type: 'string', description: 'Q1, Q2, … — unique within this document.' },
+      question: { type: 'string', description: 'One sentence, in the owner\'s terms, ending in a question mark.' },
+      options: {
+        type: 'array', minItems: 2, maxItems: 4,
+        items: {
+          type: 'object', additionalProperties: false, required: ['label', 'consequence'],
+          properties: {
+            label: { type: 'string', description: 'Short: what the owner would pick.' },
+            consequence: { type: 'string', description: 'What choosing it means, concretely, for scope, behaviour, data or cost.' },
+          },
+        },
+      },
+      recommended: { type: 'string', description: 'The label of the option you recommend. It is also the provisional decision written into the document, marked "pending owner".' },
+      why: { type: 'string', description: 'Why you recommend it, in one or two sentences.' },
+    },
+  },
+}
+
 const RECON_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -266,6 +291,22 @@ const RECON_SCHEMA = {
     // its file `docs/plans/undated-<slug>.md`. The runtime retries a schema mismatch.
     today: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$', description: 'Today\'s date exactly as `date -I` prints it (YYYY-MM-DD). Run the command; do not guess. The engine cannot read a clock; documents are named with this.' },
     docs_layout: { type: 'string', description: 'Where this repo keeps specs and plans if it has a convention (e.g. "specs: docs/specs, plans: docs/plans, named YYYY-MM-DD-<slug>.md"), and how the last few were named; empty if it has none.' },
+    // Both only when the run starts from an idea. The spec writer used to rediscover where
+    // the idea lands, and the owner's questions used to surface only after the spec and
+    // its review — asked here, the writer writes with the answers in hand.
+    touchpoints: {
+      type: 'array',
+      description: 'Where the task lands in the CURRENT tree: the files (with line ranges measured by grep -n, never estimated) the spec will have to read or change, and why each matters. Five to fifteen entries; empty when the task is genuinely greenfield or is a finished document.',
+      items: {
+        type: 'object', additionalProperties: false, required: ['path', 'lines', 'why'],
+        properties: {
+          path: { type: 'string', description: 'Repo-relative.' },
+          lines: { type: 'string', description: 'e.g. "120-164"; empty when the whole file matters.' },
+          why: { type: 'string', description: 'One line: the entry point the idea extends, the module it changes, the test that covers it, the config it reads, the second caller that must not be forgotten.' },
+        },
+      },
+    },
+    owner_questions: QUESTION_ITEMS,
   },
 }
 
@@ -677,31 +718,6 @@ const DOCTRINE_DEBUG = "DOCTRINE (from the superpowers `systematic-debugging` sk
 const DOCTRINE_REVIEW_CALIBRATION = "CALIBRATION (from the superpowers code-reviewer template): categorise by ACTUAL severity \u2014 not\neverything is critical. Be specific (file:line, not vague), explain WHY each issue matters and how to\nfix it if not obvious, and give a clear verdict. Never say \"looks good\" without checking, never mark a\nnitpick critical, never report on code you did not read, never be vague (\"improve error handling\"). If a\ndeviation from the plan looks intentional, say so as a deviation rather than a defect; if the plan\nitself is wrong, say that. Your review is read-only on this checkout: never mutate the working tree,\nthe index, HEAD or branch state; if you need another revision, use a separate `git worktree` in a\ntemporary directory. Do the whole review yourself: never spawn a subagent to review part of it.\n"
 const DOCTRINE_RECEIVING = "DOCTRINE FOR FOLDING IN A REVIEW (from the superpowers `receiving-code-review` skill):\n\nReview feedback needs technical evaluation, not performance. For each finding: READ it completely;\nrestate the requirement in your own words; VERIFY it against the document and the codebase; EVALUATE\nwhether it is right for THIS repo; then RESPOND \u2014 fold it in, or refute it with technical reasoning and\nconcrete evidence (a command you ran, a line you read). Never fold in a finding you have not verified;\nnever refuse one merely because it is inconvenient. Push back when the finding breaks something that\nexists, lacks context the document states, violates YAGNI, or contradicts a decision the owner already\nrecorded \u2014 and in that last case leave the owner's decision standing and say why. Fold in one finding at\na time; keep the document consistent after each (a change in one section usually has echoes in the\nFile map, the overlap table, the self-review and the tests). No gratitude, no \"you're absolutely\nright\": state what changed. Record the disposition of every finding, folded or refuted, in a fold-in\nsection at the end of the document.\n"
 
-const QUESTION_ITEMS = {
-  type: 'array',
-  description: 'Decisions the OWNER should make, not you. Escalate only when the choice affects money, risk, data, ownership, reverses something that exists, or careful colleagues would decide it differently. Everything else you decide and record.',
-  items: {
-    type: 'object', additionalProperties: false,
-    required: ['id', 'question', 'options', 'recommended', 'why'],
-    properties: {
-      id: { type: 'string', description: 'Q1, Q2, … — unique within this document.' },
-      question: { type: 'string', description: 'One sentence, in the owner\'s terms, ending in a question mark.' },
-      options: {
-        type: 'array', minItems: 2, maxItems: 4,
-        items: {
-          type: 'object', additionalProperties: false, required: ['label', 'consequence'],
-          properties: {
-            label: { type: 'string', description: 'Short: what the owner would pick.' },
-            consequence: { type: 'string', description: 'What choosing it means, concretely, for scope, behaviour, data or cost.' },
-          },
-        },
-      },
-      recommended: { type: 'string', description: 'The label of the option you recommend. It is also the provisional decision written into the document, marked "pending owner".' },
-      why: { type: 'string', description: 'Why you recommend it, in one or two sentences.' },
-    },
-  },
-}
-
 const SPEC_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -963,6 +979,25 @@ const recon = await callAgent(
     '5. DATE AND DOCUMENTS. Run `date -I` and report it as `today`. Look for where this repo keeps',
     '   design specs and implementation plans (docs/specs, docs/plans, docs/superpowers/…, a docs/',
     '   README) and how the most recent ones are named; report that in `docs_layout`, or empty.',
+    (FROM === 'idea'
+      ? [
+        '',
+        '6. WHERE THE TASK LANDS, AND WHAT THE OWNER MUST DECIDE. The task above is an idea; a spec',
+        '   writer reads your answer next and starts from it instead of rediscovering the repo.',
+        '   `touchpoints`: grep for the names, routes, tables, flags and modules the idea mentions and',
+        '   list the files it will have to read or change — the entry point it extends, the module it',
+        '   changes, the tests that cover it, the config it reads, and any SECOND caller or UI the',
+        '   change must reach — each with a line range measured with `grep -n` and one line on why it',
+        '   matters. Five to fifteen entries, measured on the current tree, never guessed; empty only',
+        '   when the idea is genuinely greenfield.',
+        '   `owner_questions`: the questions a careful colleague would put to the owner BEFORE',
+        '   designing this — only where a choice affects money, risk, data, ownership, reverses',
+        '   something that exists, or is one careful colleagues would make differently. Two to four',
+        '   options each, the consequence of each, your recommendation and why. The engine asks the',
+        '   owner before the spec is written. Most ideas have zero or one such question; never ask',
+        '   what the idea already states, and never ask what a careful colleague would decide alone.',
+      ].join('\n')
+      : ''),
   ].join('\n'),
   { label: 'recon', phase: 'Recon', model: CODER, effort: EFFORT, schema: RECON_SCHEMA }
 )
@@ -1338,8 +1373,59 @@ async function reviewAndFold(kind, docPath, extra, writerSha) {
   return out
 }
 
+// The owner's decisions a writer starts with, in the shape the writer must record. Answers
+// come from the resume (the questions Recon raised before the spec existed); with
+// pauseForOwner:false the recommended options stand and the writer is told so. Empty when
+// there is nothing to record.
+function ownerDecisionsBlock(stage, questions) {
+  const byId = Object.fromEntries((questions || []).map((q) => [q.id, q]))
+  const given = answersFor(stage)
+  const lines = []
+  if (given.length) {
+    lines.push(
+      'THE OWNER HAS ALREADY ANSWERED THESE QUESTIONS (binding; the owner outranks every reviewer and every',
+      'provisional decision). Write each into the document as the decision, attributed to the owner, in a table',
+      'titled "Decisions taken by the owner" (question, decision, date ' + TODAY + '), and apply its consequence',
+      'throughout. Never re-raise one of them:',
+      JSON.stringify(given.map((a) => ({ id: a.id, question: (byId[a.id] || {}).question || '', answer: a.answer,
+        options: (byId[a.id] || {}).options || [] })), null, 2),
+    )
+  }
+  if (!PAUSE_FOR_OWNER) {
+    const answered = new Set(given.map((a) => a.id))
+    const standing = (questions || []).filter((q) => !answered.has(q.id))
+    if (standing.length) {
+      lines.push(
+        'THESE QUESTIONS WERE RAISED BEFORE YOU AND THE OWNER WAS NOT ASKED (pauseForOwner:false); the recommended',
+        'option stands. Write each into the document as the decision, marked "(recommended option; owner not',
+        'asked)", and do not raise it again:',
+        JSON.stringify(standing.map((q) => ({ id: q.id, question: q.question, recommended: q.recommended, why: q.why })), null, 2),
+      )
+    }
+  }
+  return lines.join('\n')
+}
+
+// Recon's map of where the idea lands, as a list the writer reads before it explores.
+function touchpointsBlock(points) {
+  const list = (Array.isArray(points) ? points : []).filter((t) => t && t.path)
+  if (!list.length) return ''
+  return [
+    'WHERE THE TASK LANDS (measured by Recon on the current tree). Start here: read these, cite what you read,',
+    'and explore beyond them only where they run out. A file listed here that the spec does not mention needs a',
+    'reason in the spec.',
+    ...list.map((t) => '- ' + t.path + (t.lines ? ':' + t.lines : '') + ' — ' + (t.why || '')),
+  ].join('\n')
+}
+
 // ----- Spec ---------------------------------------------------------------
 if (FROM === 'idea') {
+  // The questions Recon raised are the owner's before a word of the spec is written: the
+  // writer then designs with the answers in hand instead of around a provisional decision
+  // the reviewer has to fold around and an author has to rewrite after the pause.
+  const ideaQuestions = namespaced('idea', recon.owner_questions || [])
+  const pauseIdea = ownerGate('idea', ideaQuestions, null)
+  if (pauseIdea) return pauseIdea
   phase('Spec')
   const spec = await callAgent(
     [
@@ -1353,6 +1439,10 @@ if (FROM === 'idea') {
       (recon.layout_notes ? 'Layout: ' + recon.layout_notes : ''),
       (recon.conventions ? 'Conventions (binding): ' + recon.conventions : ''),
       (DOCS_LAYOUT ? 'Documents convention: ' + DOCS_LAYOUT : ''),
+      '',
+      touchpointsBlock(recon.touchpoints),
+      '',
+      ownerDecisionsBlock('idea', ideaQuestions),
       '',
       DOCTRINE_BRAINSTORM,
       'OUTPUT:',
@@ -1369,6 +1459,7 @@ if (FROM === 'idea') {
       '  options, the consequence of each, and your recommendation with its reason; write the recommended',
       '  option into the spec as the provisional decision, marked "pending owner", so the document is',
       '  complete either way. The run will pause and ask the owner. Everything below that bar, decide.',
+      '  A question the owner has already answered above is settled: never raise it again.',
       (PAUSE_FOR_OWNER ? '' : '- THE OWNER WILL NOT BE ASKED in this run (pauseForOwner:false). Still list such questions in\n' +
         '  `open_questions` with your recommendation, but write the recommended option into the document as the\n' +
         '  decision, marked "(recommended option; owner not asked)" — never "pending owner".'),
@@ -1406,9 +1497,9 @@ if (FROM === 'idea' || FROM === 'spec') {
       'measured against the CURRENT tree.',
       '',
       specRef,
-      (answersFor('spec').length
-        ? '\nTHE OWNER\'S ANSWERS to the spec\'s questions (binding; already folded into the spec):\n' +
-          JSON.stringify(answersFor('spec'), null, 2)
+      (answersFor('idea').length || answersFor('spec').length
+        ? '\nTHE OWNER\'S ANSWERS to the questions raised before and by the spec (binding; already written into the spec):\n' +
+          JSON.stringify([...answersFor('idea'), ...answersFor('spec')], null, 2)
         : ''),
       '',
       'THE REPO: ' + (recon.ecosystem || 'unknown') + ' on branch ' + (recon.branch || '?') + '.',
