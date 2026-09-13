@@ -20,12 +20,12 @@ flowchart TD
     I([idea · spec · plan]) --> PB[Probe<br/>one tool-free call each to sonnet and opus: usable from this account?]
     PB --> R[Recon<br/><i>sonnet</i>: git state, ecosystem, the one check command — run once, time-capped — today's date]
     R --> S[Spec<br/><i>sonnet</i>: brainstorming doctrine → docs/specs/…md, committed]
-    S --> SR[Spec review<br/><i>opus</i> attacks with evidence, then folds in what survives re-verification]
+    S --> SR[Spec review<br/><i>opus</i> attacks with evidence, then edits and commits the spec with what survives re-verification]
     SR --> Q1{owner<br/>questions?}
     Q1 -- yes --> P1[[pause · ask the owner · resume with answers]]
     Q1 -- no --> P
     P1 --> P[Plan<br/><i>sonnet</i>: writing-plans doctrine → docs/plans/…md, committed]
-    P --> PR[Plan review<br/><i>opus</i> opens every line range, compiles every block, greps every fixture — runs no tests — then folds in]
+    P --> PR[Plan review<br/><i>opus</i> opens every line range, compiles every block, greps every fixture — runs no tests — then edits and commits the plan]
     PR --> Q2{owner<br/>questions?}
     Q2 -- yes --> P2[[pause · ask · resume]]
     Q2 -- no --> SL
@@ -48,9 +48,9 @@ flowchart TD
 | Probe | both | one trivial answer per pinned model | a model this account cannot use → stop, for cents |
 | Recon | Sonnet | git state, ecosystem, the one check command (the fastest real one, run once under a time cap), today's date, the docs convention | not a repo, dirty tree or the trunk → stop |
 | Spec | Sonnet | `docs/specs/YYYY-MM-DD-<slug>.md`, committed; small decisions recorded, big ones escalated | |
-| Spec review | Opus | findings with evidence; the same lane folds in what survives its re-verification and withdraws the rest, with evidence | unanswered owner questions → **pause** |
+| Spec review | Opus | findings with evidence; the same lane edits the spec to fold in what survives its re-verification, withdraws the rest with evidence, and commits — proved by the commit's `git show --stat` | no new commit listing the spec, even after one editor lane → stop; unanswered owner questions → **pause** |
 | Plan | Sonnet | `docs/plans/YYYY-MM-DD-<slug>.md`, committed; one task per future slice, real code, measured line ranges | |
-| Plan review | Opus | line ranges opened, code blocks compiled, fixtures and signatures grepped — no tests run, no worktree; then the fold-in | unanswered owner questions → **pause** |
+| Plan review | Opus | line ranges opened, code blocks compiled, fixtures and signatures grepped — no tests run, no worktree; then the fold-in, edited and committed into the plan and proved the same way | no new commit listing the plan, even after one editor lane → stop; unanswered owner questions → **pause** |
 | Slice | Opus | one task = one slice, pointers not pastes, chains longer than four merged | |
 | Cost gate | — | spent so far, ahead with a low–high band, total, at API list prices | **pause** until approved |
 | Implement | Sonnet | one fresh agent per slice; a commit each | |
@@ -65,7 +65,8 @@ no implementer touched a file another slice had declared, and nothing was uncomm
 review time — otherwise `not_ok` lists the reasons. A lane that returns nothing or throws
 — primary and fallback alike — is recorded in `lane_errors`; a slice with no implementer
 result is named in `not_implemented`; a document reviewer or answers author that
-returns nothing stops the run before any code is built; an adversary
+returns nothing, or a review whose findings never reach the file, stops the run before
+any code is built; an adversary
 that never returned makes the run `ok:false` with `review_missing:true` rather than
 clean; and a finding whose patch failed or was disputed stays on the orchestrator's list,
 while one reported fixed is closed only by the re-review's silence after it has read the

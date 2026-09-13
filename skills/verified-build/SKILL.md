@@ -36,7 +36,12 @@ every fixture and signature by grep, but **never running the tests or splicing a
 a worktree**: the implementers run every test for real a phase later — and then, in the
 same lane, folds in what survives its own re-verification and withdraws the rest with the
 evidence. A finding that would reverse a recorded owner decision is withdrawn on that
-ground. (Until 2026-09-12 the fold-in was a second Opus lane per document; measured, it was
+ground. **Folding in means editing the file**: the reviewer commits its edits and the
+fold-in record, and pastes that commit's `git show --stat` for the document; the engine
+checks for a new commit that lists the document. A review with findings that fails that
+check gets one Opus editor lane (`spec-edit:rN` / `plan-edit:rN`) that writes the findings
+in; if the editor fails it too, the run stops at `stage:'spec-review'` / `'plan-review'`
+before anything is built. (Until 2026-09-12 the fold-in was a second Opus lane per document; measured, it was
 16 of the front half's 92 minutes and refuted 0 of 17 findings.)
 
 **The owner is asked the questions that are theirs, and nothing else.** A spec or
@@ -331,8 +336,10 @@ without `executed:true` is treated as not clean (the reviewer's own word is kept
   repo, git missing) and what to do about it, rather than describing it as a failed build.
 - `stage:'spec'` / `'plan'` — a document writer returned nothing after its fallback, or
   the author recording the owner's answers did (the document still says "pending owner").
-- `stage:'spec-review'` / `'plan-review'` — a document reviewer
-  returned nothing; the document is committed but that gate never ran. Relaunch.
+- `stage:'spec-review'` / `'plan-review'` — a document reviewer returned nothing, or its
+  findings never reached the file (no new commit listing the document, even after the
+  editor lane); the document is committed but that gate never ran or was never folded
+  in, and `error` says which. Relaunch.
 - `stage:'implement'` / `'review'` with an `error` naming the token budget —
   the turn's "+Nk" ceiling was nearly spent and the engine stopped between phases with a
   partial report rather than a wall of lost lanes; `lane_errors` and whatever ran are in it.

@@ -741,7 +741,7 @@ const DOC_REVIEW_SCHEMA = {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false,
-        required: ['id', 'severity', 'where', 'claim', 'evidence', 'fix', 'disposition'],
+        required: ['id', 'severity', 'where', 'claim', 'evidence', 'fix', 'disposition', 'changed'],
         properties: {
           id: { type: 'string', description: 'F1, F2, …' },
           severity: { type: 'string', enum: ['critical', 'major', 'minor'] },
@@ -756,7 +756,21 @@ const DOC_REVIEW_SCHEMA = {
     },
     recommendations: { type: 'array', items: { type: 'string' }, description: 'Advisory; never blocks.' },
     questions_for_owner: QUESTION_ITEMS,
-    commit_sha: { type: 'string', description: 'The commit that carries the fold-in; empty if nothing was folded.' },
+    commit_sha: { type: 'string', description: 'The NEW commit that carries your edits to the document (fold-ins and the fold-in record); empty only when there are no findings.' },
+    document_diff_stat: { type: 'string', description: 'The output of `git show --stat <commit_sha> -- <the document>`, pasted verbatim; it must list the document. Empty only when there are no findings.' },
+    summary: { type: 'string' },
+  },
+}
+
+// The editor sent after a reviewer whose findings never reached the file.
+const EDIT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['applied', 'commit_sha', 'document_diff_stat', 'summary'],
+  properties: {
+    applied: { type: 'array', items: { type: 'string' }, description: 'Finding ids whose fix is now in the document.' },
+    commit_sha: { type: 'string', description: 'The new commit that carries the edits.' },
+    document_diff_stat: { type: 'string', description: 'The output of `git show --stat <commit_sha> -- <the document>`, pasted verbatim.' },
     summary: { type: 'string' },
   },
 }
@@ -1141,23 +1155,43 @@ function answersLost(stage, docPath) {
 function docLaneLost(kind, rounds) {
   const lost = rounds.find((r) => r.lost)
   if (!lost) return null
-  return { ok: false, stage: kind + '-review', error: 'the ' + kind + ' ' + lost.lost + ' of round ' + lost.round + ' returned nothing after its fallback; ' +
+  const what = lost.why
+    ? 'the ' + kind + ' review of round ' + lost.round + ' never reached the document: ' + lost.why + '; '
+    : 'the ' + kind + ' ' + lost.lost + ' of round ' + lost.round + ' returned nothing after its fallback; '
+  return { ok: false, stage: kind + '-review', error: what +
     'the ' + kind + ' is committed but ' + (lost.lost === 'reviewer' ? 'unreviewed' : 'its review is not folded in') + '. Nothing was sliced or implemented. Relaunch to retry.',
     recon, documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null }, lane_errors: laneErrors }
 }
 
-async function reviewAndFold(kind, docPath, extra) {
-  // kind: 'spec' | 'plan'. Returns the list of {review, fold} rounds; `fold` is derived
+// A finding is folded in when the document changed, not when a reviewer says so. Every
+// finding leaves at least a row in the fold-in record, so a review with findings must
+// report a NEW commit (not the writer's, not the previous round's) whose `git show --stat`
+// lists the document. Returns null when that holds, else what is missing.
+function docEditUnproven(findingCount, sha, stat, docPath, priorSha) {
+  if (!findingCount) return null
+  const s = String(sha || '').trim()
+  const p = String(priorSha || '').trim()
+  if (!s) return 'reported no commit'
+  if (p && (s.startsWith(p) || p.startsWith(s))) return 'reported the previous commit on the document (' + s.slice(0, 8) + '), not a new one'
+  const base = String(docPath || '').split('/').pop()
+  if (!base || !String(stat || '').includes(base)) return 'showed a `git show --stat` that does not list ' + docPath
+  return null
+}
+
+async function reviewAndFold(kind, docPath, extra, writerSha) {
+  // kind: 'spec' | 'plan'. Returns the list of {review, fold, edit} rounds; `fold` is derived
   // from the same agent's dispositions so the consumers keep their shape.
   const out = []
+  let priorSha = String(writerSha || '')
   for (let r = 1; r <= DOC_ROUNDS; r++) {
     phase(kind === 'spec' ? 'Spec review' : 'Plan review')
     const review = await callAgent(
       [
         'You are the ADVERSARIAL REVIEWER of a ' + (kind === 'spec' ? 'design spec' : 'implementation plan') +
         ', and then its EDITOR. First refute the claim that it is complete, consistent and ready for the next',
-        'stage; then fold in what held, and commit. A clean verdict you cannot defend is worse than a false',
-        'alarm; a finding without evidence is noise.',
+        'stage; then EDIT THE DOCUMENT YOURSELF to fold in what held, and commit. Findings you only list are not',
+        'a review: the next stage reads the file, not your report. A clean verdict you cannot defend is worse',
+        'than a false alarm; a finding without evidence is noise.',
         '',
         'THE DOCUMENT: ' + docPath + ' — read it whole.',
         (extra || ''),
@@ -1209,7 +1243,7 @@ async function reviewAndFold(kind, docPath, extra) {
         '  two sentences that contradict each other. Under uncertainty, raise it — you will verify it yourself',
         '  in Part 2 before it changes anything; a false negative costs a build.',
         '- status "approved" ONLY if you read the whole document and found nothing meeting that bar; then Part 2',
-        '  is empty and commit_sha is empty.',
+        '  and Part 3 are empty, and commit_sha and document_diff_stat are empty.',
         '- A decision the document took that the OWNER should make (money, risk, data, ownership, a reversal',
         '  of something that exists, a choice careful colleagues would make differently) is not a finding —',
         '  put it in `questions_for_owner` with options, consequences and your recommendation. ' +
@@ -1223,6 +1257,8 @@ async function reviewAndFold(kind, docPath, extra) {
         '- Take your findings one at a time. VERIFY each against the document and the tree again before you act:',
         '  a finding that does not survive its own verification is `withdrawn` with the evidence in `changed`,',
         '  and the text is left as it was. Fold in the rest and say in `changed` what changed.',
+        '- "Folded" means YOU edited ' + docPath + ' with your file-editing tools so that it now says the fix. A',
+        '  finding marked folded whose text is unchanged in the file is a false report, not a fold-in.',
         '- The owner\'s recorded decisions (' + (kind === 'spec' ? 'the "Decisions taken without the owner" and "Decisions taken by the owner" sections' : 'the spec\'s decisions, which the plan must not silently reverse') + ')',
         '  outrank you. A finding that would reverse one is `withdrawn` on that ground, and says so.',
         '- Keep the document whole and consistent after every fold-in: file map, overlap table, self-review,',
@@ -1232,6 +1268,11 @@ async function reviewAndFold(kind, docPath, extra) {
         '- Append a "## Fold-in record (review round ' + r + ')" section: a table of every finding id, severity,',
         '  disposition (folded / withdrawn) and what changed or why not.',
         '- ' + COMMIT_RULES + ' Report the commit in commit_sha.',
+        '',
+        'PART 3 — PROVE IT. Run `git show --stat <commit_sha> -- ' + docPath + '` and paste its output in',
+        '`document_diff_stat`; it must list the document. The engine checks this: a review with findings and no',
+        'new commit touching the document gets an editor sent after it, and if that fails too the run stops',
+        'before anything is built.',
         (r > 1 ? '\nThis is review round ' + r + '; the fold-in of round ' + (r - 1) + ' is already in the file.' : ''),
       ].join('\n'),
       { label: kind + '-review:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: DOC_REVIEW_SCHEMA }
@@ -1240,15 +1281,48 @@ async function reviewAndFold(kind, docPath, extra) {
     const findings = Array.isArray(review.findings) ? review.findings : []
     const folded = findings.filter((f) => f.disposition === 'folded')
     const withdrawn = findings.filter((f) => f.disposition !== 'folded')
+    let commitSha = review.commit_sha || ''
+    let edit = null
+    const unproven = docEditUnproven(findings.length, commitSha, review.document_diff_stat, docPath, priorSha)
+    if (unproven) {
+      log('WARNING: the ' + kind + ' reviewer of round ' + r + ' ' + unproven + ' — sending an editor to write its ' + findings.length + ' finding(s) into ' + docPath)
+      edit = await callAgent(
+        [
+          'You are the EDITOR of ' + docPath + '. Its adversarial reviewer (review round ' + r + ') reported the findings',
+          'below with their dispositions, but it ' + unproven + '. The review is not done until the document says it.',
+          '',
+          'THE FINDINGS (already verified by the reviewer; do not re-litigate a disposition):',
+          JSON.stringify(findings, null, 2),
+          '',
+          'DO THIS:',
+          '- Open ' + docPath + ' as it stands now. For every `folded` finding, EDIT THE FILE so it says what the',
+          '  finding\'s `fix` and `changed` say. Where the edit is already in the file, leave it.',
+          '- Keep the document whole and consistent: file map, overlap table, self-review, line ranges (re-measure',
+          '  them), test names. Change nothing no finding names.',
+          '- Make sure a "## Fold-in record (review round ' + r + ')" section lists every finding id, severity,',
+          '  disposition (folded / withdrawn) and what changed or why it was withdrawn.',
+          '- ' + COMMIT_RULES,
+          '- Then run `git show --stat <your commit> -- ' + docPath + '` and paste its output in `document_diff_stat`;',
+          '  it must list the document.',
+        ].join('\n'),
+        { label: kind + '-edit:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: EDIT_SCHEMA }
+      )
+      const still = edit ? docEditUnproven(findings.length, edit.commit_sha, edit.document_diff_stat, docPath, priorSha) : 'returned nothing after its fallback'
+      if (still) {
+        out.push({ round: r, review, fold: null, edit, lost: 'editor', why: 'the reviewer ' + unproven + ', and the editor sent after it ' + still })
+        break
+      }
+      commitSha = edit.commit_sha
+    }
+    if (commitSha) priorSha = commitSha
     // The same agent's dispositions, in the shape the earlier two-lane design reported.
     const fold = findings.length
       ? { folded: folded.map((f) => f.id), refuted: withdrawn.map((f) => ({ id: f.id, evidence: f.changed || 'withdrawn without a reason' })),
-        commit_sha: review.commit_sha || '', summary: review.summary }
+        commit_sha: commitSha, summary: review.summary }
       : null
     log(kind + ' review round ' + r + ': ' + review.status + ', ' + findings.length + ' finding(s)' +
-      (findings.length ? ' — ' + folded.length + ' folded, ' + withdrawn.length + ' withdrawn' + (fold && fold.commit_sha ? ' @ ' + String(fold.commit_sha).slice(0, 8) : ' (no commit reported)') : ''))
-    if (folded.length && !review.commit_sha) log('WARNING: the ' + kind + ' reviewer folded ' + folded.length + ' finding(s) but reported no commit')
-    out.push({ round: r, review, fold })
+      (findings.length ? ' — ' + folded.length + ' folded, ' + withdrawn.length + ' withdrawn @ ' + String(commitSha).slice(0, 8) + (edit ? ' (by the editor)' : '') : ''))
+    out.push({ round: r, review, fold, edit })
     // A fold-in is a decision too: the reviewer changed the document on its own finding, or
     // withdrew it. Both go on the record, so the owner can overturn either.
     for (const f of folded) {
@@ -1307,7 +1381,7 @@ if (FROM === 'idea') {
   documents.spec = spec
   documents.decisions.push(...(spec.decisions || []).map((d) => ({ stage: 'spec', ...d })))
   log('spec: ' + spec.path + ' (' + spec.classification + ', ' + (spec.decisions || []).length + ' decision(s) taken without the owner)')
-  documents.spec_reviews = await reviewAndFold('spec', SPEC_PATH, 'THE IDEA IT CAME FROM:\n' + TASK)
+  documents.spec_reviews = await reviewAndFold('spec', SPEC_PATH, 'THE IDEA IT CAME FROM:\n' + TASK, spec.commit_sha)
   const specLost = docLaneLost('spec', documents.spec_reviews)
   if (specLost) return specLost
   const specQuestions = namespaced('spec', [
@@ -1379,7 +1453,7 @@ if (FROM === 'idea' || FROM === 'spec') {
   documents.plan = planDoc
   documents.decisions.push(...(planDoc.decisions || []).map((d) => ({ stage: 'plan', ...d })))
   log('plan: ' + planDoc.path + ' (' + planDoc.tasks.length + ' task(s), ' + (planDoc.decisions || []).length + ' decision(s))')
-  documents.plan_reviews = await reviewAndFold('plan', PLAN_PATH, (SPEC_PATH ? 'THE SPEC IT IMPLEMENTS: ' + SPEC_PATH : 'THE REQUIREMENTS:\n' + TASK))
+  documents.plan_reviews = await reviewAndFold('plan', PLAN_PATH, (SPEC_PATH ? 'THE SPEC IT IMPLEMENTS: ' + SPEC_PATH : 'THE REQUIREMENTS:\n' + TASK), planDoc.commit_sha)
   const planLost = docLaneLost('plan', documents.plan_reviews)
   if (planLost) return planLost
   const planQuestions = namespaced('plan', [
@@ -1529,7 +1603,8 @@ const spentCounts = {
   probe: PROBE_MODELS ? new Set([CODER, JUDGE]).size : 0,
   recon: 1,
   spec: documents.spec ? 1 : 0,
-  doc_review: documents.spec_reviews.filter((r) => r.review).length + documents.plan_reviews.filter((r) => r.review).length,
+  doc_review: documents.spec_reviews.filter((r) => r.review).length + documents.plan_reviews.filter((r) => r.review).length +
+    [...documents.spec_reviews, ...documents.plan_reviews].filter((r) => r.edit).length,   // an editor lane is priced like a review
   plan_doc: documents.plan && FROM !== 'plan' ? 1 : 0,
   plan_review: documents.plan_reviews.filter((r) => r.review).length,
   answers: (answersFor('spec').length ? 1 : 0) + (answersFor('plan').length ? 1 : 0),

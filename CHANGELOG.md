@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.5.1 — 2026-09-13
+
+**A document review is folded in only when the document changed.** The spec and plan
+reviewers were told to fold their findings in and commit, but the engine took their word:
+a review that marked findings `folded` without editing the file, or without a commit, only
+logged a warning, and the next stage read an unchanged document. The reviewer prompt now
+says the reviewer edits the file itself ("findings you only list are not a review") and
+adds a Part 3: paste `git show --stat <commit> -- <document>` into a new required
+`document_diff_stat`. The engine checks every review with findings for a new commit — not
+the writer's, not the previous round's — whose stat lists the document. One that fails gets
+a single Opus editor lane (`spec-edit:rN` / `plan-edit:rN`) with the findings and their
+dispositions; if the editor fails the same check or returns nothing, the run stops at
+`stage:'spec-review'` / `'plan-review'` with the reason, before anything is sliced.
+`changed` is now required on every finding. The fold's `commit_sha` is the editor's when
+one ran, each round carries `edit`, and the cost gate counts an editor as a `doc_review`
+agent. Two tests, and two assertions on the existing ones.
+
 ## v1.5.0 — 2026-09-13
 
 **Sonnet writes the spec and the plan; Opus still reviews both.** The spec writer and the

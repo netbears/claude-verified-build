@@ -31,7 +31,8 @@ function table(over) {
     recon: RECON,
     spec: { path: 'docs/specs/2026-09-11-x.md', slug: 'x', classification: 'bounded', title: 'x', summary: 's',
       decisions: [{ question: 'q', decision: 'd', why: 'w' }], open_questions: [], commit_sha: 's1' },
-    'spec-review:r1': { status: 'issues_found', findings: [{ id: 'F1', severity: 'major', where: 'sec 2', claim: 'wrong', evidence: 'line 3', fix: 'say X', disposition: 'folded', changed: 'said X' }], commit_sha: 's2', summary: 'one, folded' },
+    'spec-review:r1': { status: 'issues_found', findings: [{ id: 'F1', severity: 'major', where: 'sec 2', claim: 'wrong', evidence: 'line 3', fix: 'say X', disposition: 'folded', changed: 'said X' }], commit_sha: 's2',
+      document_diff_stat: ' docs/specs/2026-09-11-x.md | 4 ++--', summary: 'one, folded' },
     'plan-doc': { path: 'docs/plans/2026-09-11-x.md', title: 'x', commit_sha: 'p1', global_constraints_lines: '5-9',
       tasks: [{ n: 1, title: 'a', files: ['src/a.js'], lines: '10-40' }, { n: 2, title: 'b', files: ['src/b.js'], lines: '41-80' }],
       decisions: [{ question: 'order', decision: 'a first', why: 'b consumes a' }] },
@@ -88,6 +89,7 @@ test('first launch: probes, recon, the documents, the slicer, then pauses at the
   assert.ok(labels.includes('plan-doc') && labels.includes('plan-review:r1'))
   assert.ok(!labels.some((l) => /-fold:|decision-record/.test(l)), 'no separate fold-in author and no recorder: ' + labels.join(','))
   assert.ok(!labels.includes('plan-index'), 'an approved plan review commits nothing, so the plan is not re-measured')
+  assert.ok(!labels.some((l) => /-edit:/.test(l)), 'a review that committed its fold-in, or approved, needs no editor: ' + labels.join(','))
   assert.equal(labels[labels.length - 1], 'slice')
   assert.ok(!labels.some((l) => l.startsWith('impl:')), 'nothing implemented before approval')
 })
@@ -96,7 +98,8 @@ test('a plan review that folds a finding in re-measures the plan and keeps the w
   const { out, labels } = await run(BASE_ARGS, {
     'plan-review:r1': { status: 'issues_found', findings: [
       { id: 'F1', severity: 'major', where: 'Task 2', claim: 'range off', evidence: 'sed', fix: 'fix', disposition: 'folded', changed: 'fixed the range' },
-      { id: 'F2', severity: 'minor', where: 'Task 1', claim: 'wrong', evidence: 'grep', fix: 'x', disposition: 'withdrawn', changed: 'the owner decided this in spec §3' }], commit_sha: 'p2', summary: 'one folded, one withdrawn' },
+      { id: 'F2', severity: 'minor', where: 'Task 1', claim: 'wrong', evidence: 'grep', fix: 'x', disposition: 'withdrawn', changed: 'the owner decided this in spec §3' }], commit_sha: 'p2',
+      document_diff_stat: ' docs/plans/2026-09-11-x.md | 6 +++---', summary: 'one folded, one withdrawn' },
     'plan-index': { path: 'docs/plans/2026-09-11-x.md', title: 'x', commit_sha: 'p2', global_constraints_lines: '5-9',
       tasks: [{ n: 1, title: 'a', files: ['src/a.js'], lines: '10-44' }, { n: 2, title: 'b', files: ['src/b.js'], lines: '45-90' }] },
   })
@@ -545,6 +548,39 @@ test('an answers author that returns nothing stops the run: the owner\'s decisio
   assert.ok(!out.documents.decisions.some((d) => d.why === "the owner's answer"))
 })
 
+test('a reviewer that lists findings without committing them gets an editor, whose commit carries the fold-in', async () => {
+  const { out, labels, calls } = await run(BASE_ARGS, {
+    'spec-review:r1': { ...table()['spec-review:r1'], commit_sha: '', document_diff_stat: '' },
+    'spec-edit:r1': { applied: ['F1'], commit_sha: 's3', document_diff_stat: ' docs/specs/2026-09-11-x.md | 4 ++--', summary: 'applied F1' },
+  })
+  assert.equal(out.stage, 'estimate')
+  assert.ok(labels.indexOf('spec-edit:r1') > labels.indexOf('spec-review:r1'))
+  const edit = calls.find((c) => c.label === 'spec-edit:r1')
+  assert.equal(edit.model, 'opus')
+  assert.match(edit.prompt, /reported no commit/)
+  assert.match(edit.prompt, /"F1"/)
+  assert.equal(out.documents.spec_reviews[0].fold.commit_sha, 's3')
+  assert.equal(out.estimate.breakdown['done:doc_review'].agents, 3)
+})
+
+test('a review that reuses the writer\'s commit or does not touch the document is no fold-in; a failed editor stops the run', async () => {
+  const a = await run(BASE_ARGS, {
+    'plan-review:r1': { status: 'issues_found', findings: [{ id: 'F1', severity: 'major', where: 'Task 1', claim: 'c', evidence: 'e', fix: 'f', disposition: 'folded', changed: 'x' }],
+      commit_sha: 'p1', document_diff_stat: ' docs/plans/2026-09-11-x.md | 2 +-', summary: 's' },
+    'plan-edit:r1': { applied: ['F1'], commit_sha: 'p2', document_diff_stat: ' src/a.js | 2 +-', summary: 'edited the wrong file' },
+  })
+  assert.equal(a.out.ok, false)
+  assert.equal(a.out.stage, 'plan-review')
+  assert.match(a.out.error, /previous commit on the document \(p1\)/)
+  assert.match(a.out.error, /does not list docs\/plans\/2026-09-11-x\.md/)
+  assert.ok(!a.labels.includes('slice'))
+  const b = await run(BASE_ARGS, { 'spec-review:r1': { ...table()['spec-review:r1'], document_diff_stat: ' README.md | 1 +' } })
+  assert.equal(b.out.stage, 'spec-review')
+  assert.ok(b.labels.includes('spec-edit:r1'))
+  assert.match(b.out.error, /editor sent after it returned nothing/)
+  assert.ok(!b.labels.includes('plan-doc'))
+})
+
 test('a document reviewer that returns nothing stops the run before anything is sliced', async () => {
   const a = await run(BASE_ARGS, { 'spec-review:r1': null })
   assert.equal(a.out.ok, false); assert.equal(a.out.stage, 'spec-review'); assert.ok(!a.labels.includes('slice'))
@@ -579,6 +615,8 @@ test('with pauseForOwner:false the writers and reviewers are told the owner will
   const planReview = paused.calls.find((c) => c.label === 'plan-review:r1').prompt
   assert.match(planReview, /DO NOT run the test suite/)
   assert.match(planReview, /PART 2 — FOLD IN/)
+  assert.match(planReview, /EDIT THE DOCUMENT YOURSELF/)
+  assert.match(planReview, /PART 3 — PROVE IT\. Run `git show --stat <commit_sha> -- docs\/plans\/2026-09-11-x\.md`/)
 })
 
 // ---------------------------------------------------------------------------
