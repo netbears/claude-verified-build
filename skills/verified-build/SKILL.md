@@ -17,7 +17,7 @@ pass leaves standing is yours to close by hand, not a second round's.
 |---|---|---|
 | `idea` (default) | a paragraph, a prompt, a failing test, a one-line idea | spec → spec review (folds in) → plan → plan review (folds in) → slice → build |
 | `spec` | a finished spec: its path, or its text | plan → plan review (folds in) → slice → build |
-| `plan` | a finished, already-reviewed plan: its path, or its text | slice → build (this week's shape) |
+| `plan` | a finished, already-reviewed plan: its path, or its text | slice → build |
 
 Every document the engine writes is **committed on the branch** as it goes, in the
 repo's own naming (`docs/specs/YYYY-MM-DD-<slug>.md` and `docs/plans/…` unless Recon
@@ -36,13 +36,16 @@ every fixture and signature by grep, but **never running the tests or splicing a
 a worktree**: the implementers run every test for real a phase later — and then, in the
 same lane, folds in what survives its own re-verification and withdraws the rest with the
 evidence. A finding that would reverse a recorded owner decision is withdrawn on that
-ground. **Folding in means editing the file**: the reviewer commits its edits and the
-fold-in record, and pastes that commit's `git show --stat` for the document; the engine
-checks for a new commit that lists the document. A review with findings that fails that
-check gets one Opus editor lane (`spec-edit:rN` / `plan-edit:rN`) that writes the findings
-in; if the editor fails it too, the run stops at `stage:'spec-review'` / `'plan-review'`
-before anything is built. (Until 2026-09-12 the fold-in was a second Opus lane per document; measured, it was
-16 of the front half's 92 minutes and refuted 0 of 17 findings.)
+ground. (Until 2026-09-12 the fold-in was a second Opus lane per document; measured, it
+was 16 of the front half's 92 minutes and refuted 0 of 17 findings.)
+
+**Folding in means editing the file** (since v1.5.1): the reviewer commits its edits and
+the fold-in record, and pastes that commit's `git show --stat` for the document; the
+engine checks every review with findings for a new commit that lists the document. One
+that fails the check gets one Opus editor lane (`spec-edit:rN` / `plan-edit:rN`) that
+writes the findings in; if the editor fails it too, the run stops at
+`stage:'spec-review'` / `'plan-review'` before anything is built. A review with no
+findings has nothing to write, needs no commit, and the run continues.
 
 **The owner is asked the questions that are theirs, and nothing else.** A spec or
 plan writer decides the small things the way a careful colleague would and records each
@@ -51,13 +54,14 @@ data or ownership, reverses something that exists, or is one careful colleagues 
 make differently is escalated instead: it becomes an owner question with two to four
 options, the consequence of each, and a recommendation, and the recommended option is
 written into the document as the provisional decision, marked "pending owner", so the
-document is complete either way. The spec reviewer may add such questions too. If any
+document is complete either way. The spec and plan reviewers may add such questions too. If any
 is unanswered when its stage ends, **the run pauses**: it returns early with
 `paused:true` and the questions, and continues only when you relaunch it with the
 answers — see "When the run pauses with questions". `pauseForOwner:false` makes the run
 fully autonomous again; the recommended option then stands. Every decision, taken or
 answered, comes back as `documents.decisions` and is the **first thing you report**.
-The plan may not silently reverse one; a reviewer who tries is refuted on that ground.
+The plan may not silently reverse one, and a review finding that would is withdrawn on
+that ground.
 
 The stages carry the superpowers skills' doctrine, copied into the engine so the pair
 stays self-contained (MIT, Jesse Vincent): brainstorming for the spec writer,
@@ -179,7 +183,7 @@ that and stop. Nothing beyond the probes was spent. `probeModels:false` skips it
 
 **Dependencies on the box:** `git` (every lane commits and diffs; Recon runs
 `git --version` and reports its absence as "not a git repository"), and whatever the
-repo's own check command needs (Recon runs it before reporting it). `node` is needed
+repo's own check command needs (Recon runs it once, under a time cap, before reporting it). `node` is needed
 only by the pair's own `check.sh`, never by a run.
 
 **Two things it cannot do for you:**
@@ -196,14 +200,16 @@ only by the pair's own `check.sh`, never by a run.
    that matters at this level is *yours*: writing `task`, and reading the result
    honestly. Opus is the intended orchestrator. If this session is on Fable, switch
    (`/model opus`) or say plainly that you are launching from a Fable session. Fable
-   costs ~2x Opus on every meter and draws on a separately-scoped weekly cap, and the
-   Plan agent re-does the planning on Opus regardless — so the spend buys nothing.
+   costs ~2x Opus on every meter and draws on a separately-scoped weekly cap, and every
+   lane runs on the model the engine pins, whatever this session is on — so the spend
+   buys nothing.
 
 `testCmd` is now optional: Recon discovers it. Still pass it when you already know it
 from this session, or when the repo has several plausible commands and only one is the
 one that must pass — an explicit `testCmd` always wins over a discovered one, and over
 Recon's verdict that nothing is executable. Only one command is ever the gate; the
-others Recon found are `repo.other_checks`, run once by Recon and by nobody after.
+others Recon found are `repo.other_checks`, reported but never run — Recon executes only
+the fastest real check (since v1.4.0), and nobody runs the rest after it.
 
 ## The call
 
@@ -357,7 +363,9 @@ Otherwise the return value is structured. Report these, and in this order:
    owner's answers, in order; the documents carry the same decisions in their own
    tables. Then `documents.spec_path` / `documents.plan_path`, committed on the branch,
    plus each document's review (`spec_reviews`, `plan_reviews`: findings with their
-   disposition — `fold.folded`, `fold.refuted` with the evidence — and the commit). Report the decisions **before** anything about the code — a
+   disposition — `fold.folded`, `fold.refuted` with the evidence — and `fold.commit_sha`,
+   the commit that carries them; where a round's `edit` is set, the reviewer never wrote
+   its findings into the file and the editor lane did, so say so). Report the decisions **before** anything about the code — a
    build on a decision the owner would have made differently is a wrong build,
    however clean. Where `from` was `plan` this block is empty.
 1. **`final_review.clean`** — the headline. `true` means the last adversarial pass
@@ -419,7 +427,9 @@ Otherwise the return value is structured. Report these, and in this order:
    which verdicts came from the fallback model: "reviewed by Fable because Opus was
    overloaded" is a different sentence from "reviewed by Opus", and a Fable lane billed
    at ~2x Opus. A lane still `null` after its fallback appears in `lane_errors`, and if
-   it was the adversary the run is `review_missing`.
+   it was the adversary the run is `review_missing`. The rest of `models` names the
+   pinned primaries (`spec`, `plan`, `doc_review`, `implement`, `review`), `effort` and
+   `max_concurrent`.
 
 Then give the user the diff command from `diff_command` so they can read the whole
 thing themselves — after you have closed the leftovers, so the diff they read is the
@@ -506,8 +516,8 @@ decision, not a preference, and it is the reason this pattern beats doing the sa
 by hand.
 
 **Fallback tiers.** `agent()` returns nothing when a subagent dies on a terminal API
-error after the runtime's own retries — a `529 Overloaded` storm, typically — and a
-an adversary that returned nothing is a diff nobody reviewed. So every lane retries **once**
+error after the runtime's own retries — a `529 Overloaded` storm, typically — and an
+adversary that returned nothing is a diff nobody reviewed. So every lane retries **once**
 on the other tier: the Opus judge lanes (document reviewers, owner-answer authors, slicer, adversary)
 fall back to Fable, and the Sonnet lanes (recon, spec and plan writers, implement, patch) fall back to Opus. The retry is
 a separate agent with a `:fb-<model>` label, it is recorded in `models.fallbacks.used`,

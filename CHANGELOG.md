@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.5.2 — 2026-09-13
+
+**SKILL.md matches the engine again.** Checked line by line against the engine. Recon's
+other checks are reported but never run (Recon has executed only the fastest real check
+since v1.4.0; the skill still said it ran them all). The Opus-orchestrator note no longer
+says the Plan agent re-plans on Opus. The plan reviewer can raise owner questions too, and
+a finding that would reverse an owner decision is withdrawn by the reviewer, not refuted.
+Reading the result now covers a round's `edit` (the editor lane wrote the fold-in, not the
+reviewer) and the `spec` / `plan` / `doc_review` fields of `models`, and says that a
+review with no findings needs no commit. Documentation only.
+
 ## v1.5.1 — 2026-09-13
 
 **A document review is folded in only when the document changed.** The spec and plan
