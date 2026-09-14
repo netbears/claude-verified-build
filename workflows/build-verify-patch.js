@@ -1209,8 +1209,36 @@ function docEditUnproven(findingCount, sha, stat, docPath, priorSha) {
   if (!s) return 'reported no commit'
   if (p && (s.startsWith(p) || p.startsWith(s))) return 'reported the previous commit on the document (' + s.slice(0, 8) + '), not a new one'
   const base = String(docPath || '').split('/').pop()
-  if (!base || !String(stat || '').includes(base)) return 'showed a `git show --stat` that does not list ' + docPath
+  if (!base || !statListsDoc(stat, docPath)) return 'showed a `git show --stat` that does not list ' + docPath
   return null
+}
+
+// `git show --stat` wraps its path column to a terminal width and elides a long path from the
+// LEFT with `...`, so a path this engine writes itself (`docs/specs/<yyyy-mm-dd>-<slug>.md`) can
+// come back as `...-<slug>.md` — the basename's own date prefix gone. A literal `includes(base)`
+// then fails on a fold-in that genuinely happened; on 2026-09-14 that stopped a run at
+// `spec-review` twice, reviewer and editor lane alike, on a spec both had correctly committed.
+// So compare the way git prints it: take each stat row's path cell, drop a leading `...`, and
+// accept the row when the document's full path ends with what is left.
+function statListsDoc(stat, docPath) {
+  const full = String(docPath || '').trim()
+  if (!full) return false
+  const base = full.split('/').pop()
+  const text = String(stat || '')
+  if (text.includes(full) || text.includes(base)) return true
+  for (const line of text.split('\n')) {
+    // a diffstat row is ` <path> | <n> <+-/Bin>`; the rename form ` a => b` keeps its target last
+    const bar = line.indexOf('|')
+    if (bar < 0) continue
+    let cell = line.slice(0, bar).trim()
+    if (!cell) continue
+    const arrow = cell.lastIndexOf('=>')
+    if (arrow >= 0) cell = cell.slice(arrow + 2).trim().replace(/\}$/, '')
+    if (!cell.startsWith('...')) continue
+    const tail = cell.slice(3)
+    if (tail && full.endsWith(tail)) return true
+  }
+  return false
 }
 
 async function reviewAndFold(kind, docPath, extra, writerSha) {

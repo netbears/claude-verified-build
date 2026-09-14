@@ -607,6 +607,23 @@ test('a reviewer that lists findings without committing them gets an editor, who
   assert.equal(out.estimate.breakdown['done:doc_review'].agents, 3)
 })
 
+test('a `git show --stat` that elides a long path from the left still counts as a fold-in', async () => {
+  // git wraps the stat's path column and prints ` ...-14-symbol-vocabularies.md | 284 +++--`
+  // for a path this engine writes itself; a literal basename match fails on a real fold-in.
+  const elided = await run(BASE_ARGS, {
+    'spec-review:r1': { ...table()['spec-review:r1'], document_diff_stat: ' ...-09-11-x.md | 284 ++++++++---\n 1 file changed, 245 insertions(+), 39 deletions(-)' },
+  })
+  assert.equal(elided.out.stage, 'estimate')
+  assert.ok(!elided.labels.includes('spec-edit:r1'))
+  assert.equal(elided.out.documents.spec_reviews[0].fold.commit_sha, 's2')
+  // a rename row keeps its target last, and an elided path for a DIFFERENT file is still no proof
+  const wrong = await run(BASE_ARGS, {
+    'spec-review:r1': { ...table()['spec-review:r1'], document_diff_stat: ' ...-09-11-other.md | 4 ++--' },
+  })
+  assert.equal(wrong.out.stage, 'spec-review')
+  assert.ok(wrong.labels.includes('spec-edit:r1'))
+})
+
 test('a review that reuses the writer\'s commit or does not touch the document is no fold-in; a failed editor stops the run', async () => {
   const a = await run(BASE_ARGS, {
     'plan-review:r1': { status: 'issues_found', findings: [{ id: 'F1', severity: 'major', where: 'Task 1', claim: 'c', evidence: 'e', fix: 'f', disposition: 'folded', changed: 'x' }],

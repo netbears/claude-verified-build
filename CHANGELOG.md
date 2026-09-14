@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.6.1 — 2026-09-14
+
+**A fold-in that happened is no longer read as a fold-in that did not.** `git show --stat`
+wraps its path column to a terminal width and elides a long path from the LEFT with `...`,
+so a document this engine names itself — `docs/specs/<yyyy-mm-dd>-<slug>.md` — comes back
+as ` ...-14-<slug>.md | 284 ++++---`, the basename's own date prefix gone. `docEditUnproven`
+matched the basename literally, so on 2026-09-14 a stonks-v2 run stopped at
+`stage:'spec-review'` on a spec whose review had been folded in correctly and committed
+twice over: the reviewer's commit was rejected, the editor lane sent after it committed a
+further re-measurement of every cited line range, and its `--stat` was rejected for the
+same reason. Nothing was sliced; the spec on the branch was complete and correct the whole
+time.
+
+`statListsDoc` now compares the way git prints it — each stat row's path cell, a leading
+`...` dropped, accepted when the document's full path ends with what is left (a rename
+row's target is taken last). The full path and the plain basename still match as before,
+and an elided path for a *different* file is still no proof, so the gate keeps its teeth.
+
 ## v1.6.0 — 2026-09-13
 
 **The owner is asked before the spec is written, and the writer starts from a map.** On
