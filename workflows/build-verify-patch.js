@@ -3,12 +3,12 @@ export const meta = {
   description: 'From an idea: Sonnet writes the spec and Opus reviews and folds it in; the same for the plan; then Sonnet implements in waves of 15, Opus adversarially reviews the combined diff and re-runs the repo\'s check, and one patch round closes critical/major findings',
   whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix.',
   phases: [
-    { title: 'Probe', detail: 'one trivial call per model: are sonnet and opus enabled for this account?' },
+    { title: 'Probe', detail: 'one trivial call per primary model: is each of them enabled for this account?' },
     { title: 'Recon', detail: 'sonnet reads the repo: git state, ecosystem, how it verifies itself, where the idea lands, what the owner must decide first', model: 'sonnet' },
-    { title: 'Spec', detail: 'sonnet turns the idea into a spec (brainstorming doctrine) from recon\'s map and the owner\'s answers, commits it', model: 'sonnet' },
-    { title: 'Spec review', detail: 'opus adversarially reviews the spec, then folds its own findings in', model: 'opus' },
-    { title: 'Plan', detail: 'sonnet writes the implementation plan from the spec (writing-plans doctrine), commits it', model: 'sonnet' },
-    { title: 'Plan review', detail: 'opus adversarially reviews the plan against the tree (reading and compiling, never running the tests), then folds its own findings in', model: 'opus' },
+    { title: 'Spec', detail: 'sonnet (docWriter overrides) turns the idea into a spec (brainstorming doctrine) from recon\'s map and the owner\'s answers, commits it', model: 'sonnet' },
+    { title: 'Spec review', detail: 'opus (docJudge overrides) adversarially reviews the spec, then folds its own findings in', model: 'opus' },
+    { title: 'Plan', detail: 'sonnet (docWriter overrides) writes the implementation plan from the spec (writing-plans doctrine), commits it', model: 'sonnet' },
+    { title: 'Plan review', detail: 'opus (docJudge overrides) adversarially reviews the plan against the tree (reading and compiling, never running the tests), then folds its own findings in', model: 'opus' },
     { title: 'Slice', detail: 'opus maps the plan\'s tasks onto file-disjoint slices', model: 'opus' },
     { title: 'Implement', detail: 'sonnet writes and commits each slice', model: 'sonnet' },
     { title: 'Review', detail: 'opus adversarially reviews the combined diff and re-runs the repo\'s check', model: 'opus' },
@@ -90,6 +90,28 @@ const MAX_SLICES = Number(input.maxSlices) > 0 ? Math.min(Number(input.maxSlices
 const MAX_PATCH_PER_ROUND = 15
 const CODER = 'sonnet'
 const JUDGE = 'opus'
+// The five DOCUMENT lanes — spec writer, plan writer, both document reviewers, and the
+// author that records the owner's answers — ride on their own two knobs, defaulting to
+// the pinned tiers so an unqualified run is exactly what it was before v1.7.0. Raising
+// them (`docWriter:'opus', docJudge:'fable'`) buys stronger design without touching the
+// implement lane, where the token volume actually is: the front half is ~10 agents, the
+// back half is one per slice plus one per patched finding, each re-reading the repo.
+// A value the engine does not know is refused OUT LOUD and the default stands: a typo
+// silently meaning "the default" is how a run gets reported as having been reviewed by
+// a model that never saw it.
+const MODEL_ALIASES = ['sonnet', 'opus', 'fable']
+function pickModel(raw, dflt, what) {
+  const m = String(raw == null ? '' : raw).trim().toLowerCase()
+  if (!m) return dflt
+  if (MODEL_ALIASES.includes(m)) return m
+  log('ignoring ' + what + ':"' + m + '" — not one of ' + MODEL_ALIASES.join(' / ') + '; that lane stays on ' + dflt)
+  return dflt
+}
+const DOC_WRITER = pickModel(input.docWriter, CODER, 'docWriter')
+const DOC_JUDGE = pickModel(input.docJudge, JUDGE, 'docJudge')
+// Every model this run will use as a PRIMARY, in a stable order: what the probe phase
+// checks and what the estimate prices its probes at.
+const PRIMARY_MODELS = [...new Set([CODER, JUDGE, DOC_WRITER, DOC_JUDGE])]
 const EFFORT = ['low', 'medium', 'high', 'xhigh', 'max'].includes(input.effort) ? input.effort : 'high'
 // One trivial call per primary model before anything is spent. On an API-key (non-
 // subscription) account a model alias may be disabled for the organisation, and the
@@ -136,10 +158,16 @@ function clock() {
 const RUN_T0 = clock()
 function elapsed(t0) { const n = clock(); return (n == null || t0 == null) ? null : Math.round((n - t0) / 1000) }
 
+// A lane's fallback is keyed on the MODEL it ran on, not on its role: the two pinned
+// tiers keep their overridable answers, and anything else steps to the next tier up (and
+// back down from the top). Until v1.7.0 this returned null for any third model, so a
+// document lane moved onto Fable by docJudge would have had NO fallback — and a document
+// reviewer lost to a 529 storm stops the run at stage:'spec-review' with nothing built.
+const NEXT_TIER = { sonnet: 'opus', opus: 'fable', fable: 'opus' }
 function fallbackFor(model) {
   if (model === CODER) return CODER_FALLBACK
   if (model === JUDGE) return JUDGE_FALLBACK
-  return null
+  return NEXT_TIER[model] || null
 }
 
 // Never throws. agent() returns null on a terminal API error or a skip, but it THROWS
@@ -857,11 +885,16 @@ const PROFILE = {
   implement: { model: CODER, cache: 13.0, write: 0.17, out: 0.025, measured: true },   // per slice
   review: { model: JUDGE, cache: 17.0, write: 0.45, out: 0.011, measured: true },      // per adversarial pass (now also runs the check)
   patch: { model: CODER, cache: 12.0, write: 0.08, out: 0.030, measured: true },       // per patched finding
-  spec: { model: CODER, cache: 10.0, write: 0.3, out: 0.030, measured: false },          // on Sonnet since v1.5.0
-  doc_review: { model: JUDGE, cache: 18.0, write: 0.4, out: 0.035, measured: false },   // reviews AND folds in (spec 7.6+4.7M / plan 19+6.5M cache measured as two lanes on 2026-09-11)
-  plan_doc: { model: CODER, cache: 20.0, write: 0.4, out: 0.060, measured: false },      // on Sonnet since v1.5.0
-  plan_review: { model: JUDGE, cache: 25.0, write: 0.4, out: 0.020, measured: false },
-  answers: { model: JUDGE, cache: 8.0, write: 0.2, out: 0.015, measured: false },
+  // The five document rows follow docWriter / docJudge, so the cost gate prices the run
+  // the caller actually asked for: on the default tiers this is what it always was, and
+  // a `docWriter:'opus', docJudge:'fable'` run shows its front half at roughly double
+  // before a line of code is written. plan_index stays on the CODER tier deliberately —
+  // it only re-measures line numbers in a document that already exists.
+  spec: { model: DOC_WRITER, cache: 10.0, write: 0.3, out: 0.030, measured: false },     // on the CODER tier since v1.5.0
+  doc_review: { model: DOC_JUDGE, cache: 18.0, write: 0.4, out: 0.035, measured: false },// reviews AND folds in (spec 7.6+4.7M / plan 19+6.5M cache measured as two lanes on 2026-09-11)
+  plan_doc: { model: DOC_WRITER, cache: 20.0, write: 0.4, out: 0.060, measured: false }, // on the CODER tier since v1.5.0
+  plan_review: { model: DOC_JUDGE, cache: 25.0, write: 0.4, out: 0.020, measured: false },
+  answers: { model: DOC_JUDGE, cache: 8.0, write: 0.2, out: 0.015, measured: false },
   plan_index: { model: CODER, cache: 1.5, write: 0.05, out: 0.003, measured: false },
   probe: { model: CODER, cache: 0.01, write: 0.005, out: 0.0002, measured: false },      // per model probed
 }
@@ -911,7 +944,7 @@ function estimateRun(profile, prices, spent, ahead) {
 // ---------------------------------------------------------------------------
 if (PROBE_MODELS) {
   phase('Probe')
-  const probeModels = [...new Set([CODER, JUDGE])]
+  const probeModels = PRIMARY_MODELS
   const probes = await parallel(probeModels.map((m) => () =>
     agent('Answer with the structured output ok:true. Use no tools, read nothing, run nothing.',
       { label: 'probe:' + m, phase: 'Probe', model: m, effort: 'low', schema: PROBE_SCHEMA })
@@ -1166,7 +1199,7 @@ async function applyAnswers(stage, docPath, questions) {
       '  "Decisions taken by the owner" (question, decision, date ' + TODAY + ').',
       '- ' + COMMIT_RULES,
     ].join('\n'),
-    { label: stage + '-answers', phase: stage === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: FOLD_SCHEMA }
+    { label: stage + '-answers', phase: stage === 'spec' ? 'Spec review' : 'Plan review', model: DOC_JUDGE, effort: EFFORT, schema: FOLD_SCHEMA }
   )
   // The owner's answer goes on the record only once an author has written it into the
   // document; an author that returned nothing leaves "pending owner" in the text, and
@@ -1338,7 +1371,7 @@ async function reviewAndFold(kind, docPath, extra, writerSha) {
         'before anything is built.',
         (r > 1 ? '\nThis is review round ' + r + '; the fold-in of round ' + (r - 1) + ' is already in the file.' : ''),
       ].join('\n'),
-      { label: kind + '-review:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: DOC_REVIEW_SCHEMA }
+      { label: kind + '-review:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: DOC_JUDGE, effort: EFFORT, schema: DOC_REVIEW_SCHEMA }
     )
     if (!review) { out.push({ round: r, review: null, fold: null, lost: 'reviewer' }); break }
     const findings = Array.isArray(review.findings) ? review.findings : []
@@ -1368,7 +1401,7 @@ async function reviewAndFold(kind, docPath, extra, writerSha) {
           '- Then run `git show --stat <your commit> -- ' + docPath + '` and paste its output in `document_diff_stat`;',
           '  it must list the document.',
         ].join('\n'),
-        { label: kind + '-edit:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: JUDGE, effort: EFFORT, schema: EDIT_SCHEMA }
+        { label: kind + '-edit:r' + r, phase: kind === 'spec' ? 'Spec review' : 'Plan review', model: DOC_JUDGE, effort: EFFORT, schema: EDIT_SCHEMA }
       )
       const still = edit ? docEditUnproven(findings.length, edit.commit_sha, edit.document_diff_stat, docPath, priorSha) : 'returned nothing after its fallback'
       if (still) {
@@ -1493,7 +1526,7 @@ if (FROM === 'idea') {
         '  decision, marked "(recommended option; owner not asked)" — never "pending owner".'),
       '- ' + COMMIT_RULES,
     ].join('\n'),
-    { label: 'spec', phase: 'Spec', model: CODER, effort: EFFORT, schema: SPEC_SCHEMA }
+    { label: 'spec', phase: 'Spec', model: DOC_WRITER, effort: EFFORT, schema: SPEC_SCHEMA }
   )
   if (!spec) return { ok: false, stage: 'spec', error: 'the spec writer returned nothing', recon }
   SPEC_PATH = spec.path
@@ -1565,7 +1598,7 @@ if (FROM === 'idea' || FROM === 'spec') {
         '  `open_questions` with your recommendation, but write the recommended option into the document as the\n' +
         '  decision, marked "(recommended option; owner not asked)" — never "pending owner".'),
     ].join('\n'),
-    { label: 'plan-doc', phase: 'Plan', model: CODER, effort: EFFORT, schema: PLANDOC_SCHEMA }
+    { label: 'plan-doc', phase: 'Plan', model: DOC_WRITER, effort: EFFORT, schema: PLANDOC_SCHEMA }
   )
   if (!planDoc) return { ok: false, stage: 'plan', error: 'the plan writer returned nothing', recon, documents }
   PLAN_PATH = planDoc.path
@@ -1719,7 +1752,7 @@ if (groups.length === 1 && plan.slices.length > 2) {
 // The cost gate — what the rest of the run would cost at API list prices.
 // ---------------------------------------------------------------------------
 const spentCounts = {
-  probe: PROBE_MODELS ? new Set([CODER, JUDGE]).size : 0,
+  probe: PROBE_MODELS ? PRIMARY_MODELS.length : 0,
   recon: 1,
   spec: documents.spec ? 1 : 0,
   doc_review: documents.spec_reviews.filter((r) => r.review).length + documents.plan_reviews.filter((r) => r.review).length +
@@ -2195,7 +2228,12 @@ return {
   // writer took because there was no owner to ask.
   documents: { ...documents, spec_path: SPEC_PATH || null, plan_path: PLAN_PATH || null, doc_rounds: DOC_ROUNDS, pause_for_owner: PAUSE_FOR_OWNER },
   models: {
-    spec: CODER, plan: CODER, doc_review: JUDGE, implement: CODER, review: JUDGE, effort: EFFORT, max_concurrent: WAVE,
+    // What actually ran, not what the engine pins by default: docWriter / docJudge move
+    // the first four of these, and a result that named the default would misreport which
+    // model reviewed the spec.
+    spec: DOC_WRITER, plan: DOC_WRITER, doc_review: DOC_JUDGE, owner_answers: DOC_JUDGE,
+    implement: CODER, review: JUDGE, slice: JUDGE, recon: CODER, probed: PRIMARY_MODELS,
+    effort: EFFORT, max_concurrent: WAVE,
     // Lanes whose primary model returned nothing and were re-run once on the other
     // tier. A verdict from a fallback lane is still a verdict, but say which model gave it.
     fallbacks: { enabled: FALLBACK, coder: CODER_FALLBACK, judge: JUDGE_FALLBACK, used: fallbacksUsed },

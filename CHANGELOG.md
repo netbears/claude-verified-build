@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.7.0 — 2026-09-16
+
+**The document lanes can be raised for a run where the design is the risk.** Two new args,
+`docWriter` (default `sonnet`) and `docJudge` (default `opus`), move the five document
+lanes — the spec writer, the plan writer, both document reviewers, and the author that
+records the owner's answers — and nothing else. Recon, the slicer, the implementers, the
+patchers and the code adversary stay pinned: the document half is ~10 agents and the design
+every later agent inherits, while the code half is one agent per slice plus one per patched
+finding, each re-reading the repo, which is where the token volume is. `docModels:better`
+is the skill's shorthand for `docWriter:'opus', docJudge:'fable'`; an unqualified run is
+byte-for-byte what it was before. Measured on the engine's own profile at a five-slice run:
+the document half goes from USD 53 to USD 106 and the code half does not move, so the total
+goes from ~USD 101 to ~USD 154 — and the cost gate prices what the caller actually asked
+for, because the five `PROFILE` rows follow the knobs. The probe phase probes every primary
+the run will use, so a `fable` document reviewer this account cannot reach still costs cents
+to discover rather than a whole front half.
+
+**A lane on a third model now has a fallback.** `fallbackFor()` knew only the two pinned
+tiers and returned `null` for anything else, so a document reviewer on Fable would have had
+no retry at all: one `529 Overloaded` and the run stops at `stage:'spec-review'` with
+nothing built — exactly the hole v1.2.0's fallback tiers were added to close. A lane's
+fallback is still keyed on its model, `coderFallback` / `judgeFallback` still override the
+pinned two, and anything else steps one tier up (`fable` back down to `opus`).
+
+An alias the engine does not know is refused in the run log and that lane keeps its
+default, rather than a typo quietly deciding who reviewed the spec. `models` in the result
+now reports what actually ran — `spec`, `plan`, `doc_review`, `owner_answers`, `implement`,
+`review`, `slice`, `recon`, `probed` — since a result naming the default would misreport
+which model gave the verdict. Four tests: the lanes that move and the lanes that do not,
+the estimate priced on the raised tiers, the top-tier fallback, and the refused alias.
+
 ## v1.6.1 — 2026-09-14
 
 **A fold-in that happened is no longer read as a fold-in that did not.** `git show --stat`

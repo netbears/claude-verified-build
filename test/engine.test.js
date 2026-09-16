@@ -269,6 +269,57 @@ test('sonnet writes the spec and the plan, opus reviews both, and a lost writer 
   assert.equal(out.estimate.breakdown['done:plan_doc'].model, 'sonnet')
 })
 
+// The document tiers (v1.7.0). Defaults are asserted above; these four cover the override:
+// which lanes move, which do not, that the estimate is priced on what will actually run,
+// that the top tier still has somewhere to fall back to, and that a typo is refused.
+const RAISED = { docWriter: 'opus', docJudge: 'fable' }
+const SPEC_Q = { spec: { ...table().spec, open_questions: [{ id: 'Q1', question: 'Delete old rows?',
+  options: [{ label: 'yes', consequence: 'data gone' }, { label: 'no', consequence: 'kept' }], recommended: 'no', why: 'reversible' }] } }
+
+test('docWriter and docJudge move the five document lanes and leave the code lanes pinned', async () => {
+  const { out, calls, labels } = await run({ ...BASE_ARGS, ...RAISED, approveEstimate: true, answers: [{ id: 'spec:Q1', answer: 'yes' }] },
+    { ...SPEC_Q, 'probe:fable': { ok: true } })
+  const modelOf = (l) => calls.find((c) => c.label === l).model
+  assert.deepEqual(labels.filter((l) => l.startsWith('probe:')).sort(), ['probe:fable', 'probe:opus', 'probe:sonnet'])
+  assert.deepEqual([modelOf('spec'), modelOf('plan-doc')], ['opus', 'opus'])
+  assert.deepEqual([modelOf('spec-review:r1'), modelOf('plan-review:r1'), modelOf('spec-answers')], ['fable', 'fable', 'fable'])
+  assert.deepEqual([modelOf('recon'), modelOf('impl:s1'), modelOf('patch:r0:F1')], ['sonnet', 'sonnet', 'sonnet'],
+    'the token volume stays on the coder tier')
+  assert.deepEqual([modelOf('slice'), modelOf('adversary:r0')], ['opus', 'opus'], 'the code judge is untouched')
+  assert.deepEqual([out.models.spec, out.models.plan, out.models.doc_review, out.models.owner_answers], ['opus', 'opus', 'fable', 'fable'])
+  assert.deepEqual([out.models.implement, out.models.review], ['sonnet', 'opus'])
+  assert.deepEqual(out.models.probed, ['sonnet', 'opus', 'fable'])
+})
+
+test('the cost gate prices the document lanes the caller asked for, not the default ones', async () => {
+  const base = await run(BASE_ARGS)
+  const up = await run({ ...BASE_ARGS, ...RAISED }, { 'probe:fable': { ok: true } })
+  for (const k of ['done:spec', 'done:plan_doc']) assert.equal(up.out.estimate.breakdown[k].model, 'opus')
+  for (const k of ['done:doc_review', 'done:plan_review']) assert.equal(up.out.estimate.breakdown[k].model, 'fable')
+  assert.equal(up.out.estimate.breakdown['ahead:implement'].model, 'sonnet')
+  assert.ok(up.out.estimate.spent_so_far_usd > base.out.estimate.spent_so_far_usd * 1.5,
+    'the front half is materially dearer: ' + base.out.estimate.spent_so_far_usd + ' -> ' + up.out.estimate.spent_so_far_usd)
+  assert.equal(up.out.estimate.ahead_usd, base.out.estimate.ahead_usd, 'the back half is unchanged')
+})
+
+test('a document lane on the top tier still falls back instead of losing the gate', async () => {
+  const { out, labels } = await run({ ...BASE_ARGS, ...RAISED, approveEstimate: true }, { 'probe:fable': { ok: true },
+    'spec-review:r1': (label) => (label.endsWith(':fb-opus') ? table()['spec-review:r1'] : null) })
+  assert.ok(labels.includes('spec-review:r1:fb-opus'))
+  assert.deepEqual(out.models.fallbacks.used, [{ label: 'spec-review:r1', primary: 'fable', fallback: 'opus' }])
+  assert.equal(out.ok, true, 'the spec review was not lost, so the run went the whole way')
+  assert.ok(out.documents.spec_reviews[0].review, 'the fallback lane\'s verdict is the round\'s review')
+})
+
+test('a model alias the engine does not know is refused out loud and the lane keeps its default', async () => {
+  const { out, calls, labels, logs } = await run({ ...BASE_ARGS, docWriter: 'gpt-9', docJudge: '' })
+  assert.ok(logs.some((l) => /ignoring docWriter:"gpt-9"/.test(l) && /stays on sonnet/.test(l)), logs.join('\n'))
+  assert.equal(calls.find((c) => c.label === 'spec').model, 'sonnet')
+  assert.equal(calls.find((c) => c.label === 'spec-review:r1').model, 'opus')
+  assert.deepEqual(labels.filter((l) => l.startsWith('probe:')).sort(), ['probe:opus', 'probe:sonnet'])
+  assert.equal(out.estimate.breakdown['done:probe'].agents, 2)
+})
+
 test('a fallback lane is recorded and its label carries the tier', async () => {
   const { out, labels } = await run({ ...BASE_ARGS, approveEstimate: true }, { 'adversary:r0': (label) => (label.endsWith(':fb-fable') ? table()['adversary:r0'] : null) })
   assert.equal(out.ok, true)

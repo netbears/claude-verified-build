@@ -17,7 +17,7 @@ Works on any git repo in any language: the first agent discovers from the repo i
 
 ```mermaid
 flowchart TD
-    I([idea · spec · plan]) --> PB[Probe<br/>one tool-free call each to sonnet and opus: usable from this account?]
+    I([idea · spec · plan]) --> PB[Probe<br/>one tool-free call per primary model: usable from this account?]
     PB --> R[Recon<br/><i>sonnet</i>: git state, ecosystem, the one check command — run once, time-capped — today's date; from an idea, where it lands and what the owner must decide first]
     R --> Q0{owner<br/>questions?}
     Q0 -- yes --> P0[[pause · ask the owner · resume with answers]]
@@ -48,12 +48,12 @@ flowchart TD
 
 | Stage | Model | What it produces | Gate |
 |---|---|---|---|
-| Probe | both | one trivial answer per pinned model | a model this account cannot use → stop, for cents |
+| Probe | every primary | one trivial answer per model the run will use | a model this account cannot use → stop, for cents |
 | Recon | Sonnet | git state, ecosystem, the one check command (the fastest real one, run once under a time cap), today's date, the docs convention; from an idea, the files and line ranges it lands on and the owner's questions | not a repo, dirty tree or the trunk → stop; unanswered owner questions → **pause** |
-| Spec | Sonnet | `docs/specs/YYYY-MM-DD-<slug>.md`, committed, written from Recon's map with the owner's answers already recorded; small decisions recorded, big ones escalated | |
-| Spec review | Opus | findings with evidence; the same lane edits the spec to fold in what survives its re-verification, withdraws the rest with evidence, and commits — proved by the commit's `git show --stat` | no new commit listing the spec, even after one editor lane → stop; unanswered owner questions → **pause** |
-| Plan | Sonnet | `docs/plans/YYYY-MM-DD-<slug>.md`, committed; one task per future slice, real code, measured line ranges | |
-| Plan review | Opus | line ranges opened, code blocks compiled, fixtures and signatures grepped — no tests run, no worktree; then the fold-in, edited and committed into the plan and proved the same way | no new commit listing the plan, even after one editor lane → stop; unanswered owner questions → **pause** |
+| Spec | Sonnet¹ | `docs/specs/YYYY-MM-DD-<slug>.md`, committed, written from Recon's map with the owner's answers already recorded; small decisions recorded, big ones escalated | |
+| Spec review | Opus¹ | findings with evidence; the same lane edits the spec to fold in what survives its re-verification, withdraws the rest with evidence, and commits — proved by the commit's `git show --stat` | no new commit listing the spec, even after one editor lane → stop; unanswered owner questions → **pause** |
+| Plan | Sonnet¹ | `docs/plans/YYYY-MM-DD-<slug>.md`, committed; one task per future slice, real code, measured line ranges | |
+| Plan review | Opus¹ | line ranges opened, code blocks compiled, fixtures and signatures grepped — no tests run, no worktree; then the fold-in, edited and committed into the plan and proved the same way | no new commit listing the plan, even after one editor lane → stop; unanswered owner questions → **pause** |
 | Slice | Opus | one task = one slice, pointers not pastes, chains longer than four merged | |
 | Cost gate | — | spent so far, ahead with a low–high band, total, at API list prices | **pause** until approved |
 | Implement | Sonnet | one fresh agent per slice; a commit each | |
@@ -61,6 +61,10 @@ flowchart TD
 | Patch (1 round) | Sonnet | critical and major findings only, grouped by file | |
 | Re-review | Opus | every patch diff read, the check re-run: closed? and did the patches introduce anything? | |
 | Orchestrator | you | closes every leftover at every severity by hand, then reports | |
+
+¹ The four document stages, and the lane that records the owner's answers, are the one
+part you may move per run: `docModels:better` puts the writers on Opus and the reviewers on
+Fable. See "Use". Everything else is pinned.
 
 Nothing is lost quietly. `ok` is mechanical: true only when every slice was implemented,
 the adversary read the diff, ran the check and found nothing, no scope was left uncovered,
@@ -115,8 +119,9 @@ byte-identical; `install.sh` prints the checksums so you can see it.
 remote install target. `node` (18 or later) only for `check.sh`, which `install.sh` runs
 before copying anything so a broken engine is never installed (`--no-check` skips it on a
 box without node). No plugin, no package. On an API-key account, the models the engine
-pins — `sonnet` and `opus` — must be enabled for the organisation; the engine's first phase
-probes both for cents and stops with `stage:'probe'` if one is not.
+pins — `sonnet` and `opus`, plus `fable` if you raise the document tiers or a lane falls
+back — must be enabled for the organisation; the engine's first phase probes every primary
+for cents and stops with `stage:'probe'` if one is not.
 
 ## Use
 
@@ -128,6 +133,54 @@ probes both for cents and stops with `stage:'probe'` if one is not.
 `SKILL.md` for the pre-flight, the arguments, the four pauses and how to report a result
 honestly: the decisions taken first, then the adversary's verdict, then the leftovers
 closed by hand, then the cost. The skill is the opt-in that permits the Workflow tool.
+
+### The default run: Sonnet designs, Opus judges
+
+```
+/verified-build Add a --since flag to the export command: ISO dates only, tested, docs updated.
+```
+
+which the orchestrator turns into
+
+```js
+Workflow({ name: 'build-verify-patch', args: {
+  task: 'Add a --since flag to the export command: ISO dates only, tested, docs updated.',
+} })
+```
+
+Sonnet writes the spec and the plan, Opus attacks each and folds in what survives, Sonnet
+implements, Opus reviews the diff. This is the measured bargain: on a five-slice run the
+document half is about USD 53 and the code half about USD 48, at API list prices.
+
+### The same run with the design on stronger models
+
+```
+/verified-build docModels:better Add a --since flag to the export command: ISO dates only, tested, docs updated.
+```
+
+which becomes
+
+```js
+Workflow({ name: 'build-verify-patch', args: {
+  task: 'Add a --since flag to the export command: ISO dates only, tested, docs updated.',
+  docWriter: 'opus',   // the spec and plan writers
+  docJudge: 'fable',   // both document reviewers, and the author that records the owner's answers
+} })
+```
+
+Five lanes move — the two document writers, the two document reviewers, and the author
+that records the owner's answers — and **nothing else**: Recon, the slicer, the
+implementers, the patchers and the code adversary stay pinned where they are, because that
+is where the token volume is. The document half roughly doubles, to about USD 106; the code
+half does not change. The cost gate shows the real figure before a line of code is written,
+and `estimate.breakdown` names the model per row.
+
+Either knob takes `sonnet`, `opus` or `fable` on its own, so `docJudge:'fable'` alone
+(a Sonnet writer, a Fable reviewer) is a run too. An alias the engine does not know is
+refused in the run log and that lane keeps its default, rather than a typo quietly
+deciding who reviewed your spec. Worth knowing: this is for runs where the **design** is
+the risk — an unfamiliar domain, a migration whose shape you cannot picture. Where the
+risk is in the code, the same money buys more as `maxRounds: 2`.
 
 ## What it costs and where the time goes
 

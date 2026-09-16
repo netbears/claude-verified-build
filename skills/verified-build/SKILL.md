@@ -1,6 +1,6 @@
 ---
 name: verified-build
-description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Sonnet writes the spec and Opus adversarially reviews it and folds its findings in, then the same for the implementation plan; then Sonnet writes the code in parallel waves of 15, Opus adversarially reviews the combined diff and re-runs the repo's check command, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
+description: Run a multi-agent build from an idea, a spec or a plan. From an idea, Sonnet writes the spec and Opus adversarially reviews it and folds its findings in, then the same for the implementation plan; then Sonnet writes the code in parallel waves of 15, Opus adversarially reviews the combined diff and re-runs the repo's check command, and one patch round closes the critical and major findings (the rest come back to you). Works on any git repo in any language or ecosystem — application code, Terraform/OpenTofu, Helm, shell, SQL. Invoke it with docModels:better — or when the user asks for stronger, better or more expensive models on the spec and the plan — to put the two document writers on Opus and their reviewers on Fable. Use when the user asks to build, refactor, migrate or fix something non-trivial with verification — "build X with the workflow", "/verified-build", "run the verified build", "implement this and have it reviewed properly", "turn this idea into a spec, a plan and a build". Not for one-line fixes.
 ---
 
 # /verified-build — spec it, plan it, write it cheap, then attack it
@@ -10,6 +10,11 @@ implements. Opus attacks the whole diff and re-runs the check. Sonnet patches wh
 matters. Opus re-attacks.
 Nothing is called done because the model that wrote it said so — and what the last
 pass leaves standing is yours to close by hand, not a second round's.
+
+That pairing is the **default**, and the code lanes are not negotiable. The spec and plan
+lanes are: `docModels:better` (or `docWriter` / `docJudge`) puts the two writers on Opus
+and their reviewers on Fable for a run where the design is the risk — see "Raising the
+document tiers".
 
 ## Where a run can start
 
@@ -184,7 +189,8 @@ Glance before you launch; rely on Recon to catch what you missed, not to do the
 looking for you.
 
 **The engine also checks, for cents, that the models it pins are usable from this
-session.** Its first phase sends one tool-free call each to `sonnet` and `opus`. On an
+session.** Its first phase sends one tool-free call per primary model — `sonnet` and
+`opus` by default, plus whatever `docWriter` / `docJudge` name if you raised them. On an
 API-key (non-subscription) account a model alias can be disabled for the organisation,
 and on a subscription a plan may lack a tier; either used to surface fifteen agents deep
 as a wall of nulls. A result with `ok:false, stage:'probe'` names the model and says
@@ -258,6 +264,8 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `maxRounds` | `1` | max review→patch→re-review rounds (capped at 4; `0` = review only, no patching). Was 2 until 2026-09-11 — see "Tuned from six runs" |
 | `patchSeverity` | `major` | only findings at or above this severity are auto-patched (`critical` \| `major` \| `minor`); the rest are handed back in `open_findings` and `patch_rounds[].handed_off` |
 | `effort` | `high` | reasoning effort for every agent |
+| `docWriter` | `sonnet` | model for the spec and plan **writers** (`sonnet` \| `opus` \| `fable`) — see "Raising the document tiers" |
+| `docJudge` | `opus` | model for the spec and plan **reviewers** and the author that records the owner's answers |
 | `allowDirty` | `false` | run despite a dirty tree — only when those changes are genuinely part of the task |
 | `allowTrunk` | `false` | run on the shared trunk. Almost always the wrong answer; branch instead |
 | `fallback` | `true` | retry a lane once on the other tier when its primary model returns nothing (terminal API error such as `529 Overloaded`). `false` disables |
@@ -265,6 +273,42 @@ read it, and the code adversary treats it as **the bar the work must clear**.
 | `coderFallback` | `opus` | model the Sonnet lanes (recon, spec and plan writers, implement, patch) retry on |
 
 Pass a plain string instead of an object and it is taken as `task`.
+
+## Raising the document tiers
+
+`docWriter` and `docJudge` move the **five document lanes** — the spec writer, the plan
+writer, both document reviewers, and the author that records the owner's answers — and
+nothing else. Recon, the slicer, the implementers, the patchers and the code adversary
+stay exactly where they are pinned. That is the point: the document half is about ten
+agents and the design decisions everything downstream inherits, while the code half is one
+agent per slice plus one per patched finding, each re-reading the repo — which is where
+the token volume, and so the money, actually lives.
+
+**The shorthand.** When the invocation carries `docModels:better` — `/verified-build
+docModels:better <the idea>` — or the user asks in words for stronger models on the spec
+and the plan, pass `docWriter:'opus', docJudge:'fable'` and treat the rest of the
+invocation as the `task`. No token, or `docModels:default`, means the pinned pair. Never
+raise the tiers unasked: it is the user's money, and the default pair is the measured
+bargain, not a compromise.
+
+| | writer | reviewer | document half, at list prices |
+|---|---|---|---|
+| default | sonnet | opus | ~USD 53 |
+| `docModels:better` | opus | fable | ~USD 106 |
+
+(Both figures from the engine's own profile on a five-slice run, documents plus recon and
+the slicer; the back half is USD 48 either way, so the run goes from ~USD 101 to
+~USD 154. The cost gate shows the real numbers before a line of code is written, and the
+per-row `model` in `estimate.breakdown` names who is being paid for what.)
+
+Reach for it when the *design* is the risk — an unfamiliar domain, a migration whose
+shape you cannot picture, a spec that will be read by people rather than only executed.
+Leave it alone when the task is well understood and the risk is in the code: there the
+same money buys more as `maxRounds:2`, or as `effort:'max'` on a run you already trust.
+A third value, `sonnet`/`opus`/`fable`, can be given to either knob directly; anything
+else is refused in the run log and that lane keeps its default. Do not change the tiers
+on a `resumeFromRunId` — a lane's model is part of what the cache key replays on, so
+those lanes re-run rather than replaying free.
 
 ## When the run pauses with questions
 
@@ -438,9 +482,11 @@ Otherwise the return value is structured. Report these, and in this order:
    which verdicts came from the fallback model: "reviewed by Fable because Opus was
    overloaded" is a different sentence from "reviewed by Opus", and a Fable lane billed
    at ~2x Opus. A lane still `null` after its fallback appears in `lane_errors`, and if
-   it was the adversary the run is `review_missing`. The rest of `models` names the
-   pinned primaries (`spec`, `plan`, `doc_review`, `implement`, `review`), `effort` and
-   `max_concurrent`.
+   it was the adversary the run is `review_missing`. The rest of `models` names what
+   actually ran, not the defaults (`spec`, `plan`, `doc_review`, `owner_answers`,
+   `implement`, `review`, `slice`, `recon`, and `probed`), plus `effort` and
+   `max_concurrent`. Say the document tiers out loud when they were raised: "the spec was
+   reviewed by Fable" is a different claim from the default run's.
 
 Then give the user the diff command from `diff_command` so they can read the whole
 thing themselves — after you have closed the leftovers, so the diff they read is the
@@ -524,7 +570,8 @@ every closed-vocabulary guard in the smoke set.
 The models are **pinned in the workflow, not inherited from your session**: Sonnet
 writes the spec and the plan and implements, Opus judges, and Fable runs only as a fallback. That is a measured cost
 decision, not a preference, and it is the reason this pattern beats doing the same work
-by hand.
+by hand. The two document tiers are the one part you may move deliberately, per run —
+see "Raising the document tiers"; the code lanes are not a knob.
 
 **Fallback tiers.** `agent()` returns nothing when a subagent dies on a terminal API
 error after the runtime's own retries — a `529 Overloaded` storm, typically — and an
@@ -536,7 +583,10 @@ and the run logs it at the end. It exists because on 2026-09-03 Opus was overloa
 about ninety minutes, every judge lane returned null, and the run reported `ok:true`
 with zero verification. The cost is paid only when a primary fails and only for that
 lane; a Fable fallback bills ~2x Opus for it. `fallback:false` disables it,
-`judgeFallback` / `coderFallback` change the tiers. One caveat: an agent the user skips
+`judgeFallback` / `coderFallback` change the tiers. A lane on some other model — a
+document lane you raised — falls back one tier up, and Fable falls back to Opus, so
+**every** lane has somewhere to go; before v1.7.0 a Fable document reviewer had no
+fallback at all and a 529 storm would have stopped the run at `stage:'spec-review'`. One caveat: an agent the user skips
 mid-run also returns nothing and gets the same single fallback attempt. A lane that
 returns nothing after its fallback is recorded in `lane_errors`; if that lane was the
 adversary, the run comes back `ok:false` with `review_missing:true` rather than clean.
