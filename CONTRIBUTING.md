@@ -1,8 +1,8 @@
 # Contributing
 
-The pair is small on purpose: one skill file, one engine file. Most changes are a prompt
-edit, a knob, or a row in the token profile. This is how to make one without breaking the
-copies that run it.
+The pair is small on purpose: two skill files (`verified-build`, `verified-build-small`)
+and the one engine both drive. Most changes are a prompt edit, a knob, or a row in the
+token profile. This is how to make one without breaking the copies that run it.
 
 The engine file is **built**. Its source is the parts under `src/`, one per concern —
 `10-knobs.js` (args → constants), `20-lanes.js` (`callAgent`, fallbacks, waves),
@@ -19,10 +19,13 @@ part, never the built file — `check.sh` fails when the two disagree.
 
 1. **Edit in a clone of this repo**, never in a profile's copy. Profiles are installs.
    Edit under `src/` and run `node build.js`; commit the rebuilt engine with the part.
-2. **Keep the two files in step.** A knob that exists in the engine but not in
-   `SKILL.md`'s argument table is a knob nobody uses; a result field the skill tells the
-   orchestrator to read must exist in the engine's return value. Check both before you
-   commit.
+2. **Keep the two files in step.** Check both skills' argument tables against the
+   engine: a knob that exists in the engine but not in a skill's argument table is a
+   knob nobody uses; a result field a skill tells the orchestrator to read must exist
+   in the engine's return value. An arg that only one mode reads (`slices`,
+   `sharedContext`, `taskSummary` for `from:'slices'`; `docWriter`, `spec`, `pauseForOwner`
+   and the rest for the document modes) is documented in the skill that uses it, not
+   both. Check both before you commit.
 3. **Run `./check.sh`.** It first checks that the committed engine is what `src/`
    builds, then wraps the engine body in a function before `node --check`, because the
    script's top-level `return` is a Workflow-runtime feature that bare `node --check`

@@ -227,6 +227,65 @@ test('judgeReview: clean needs the diff read, no findings, and the check run whe
   assert.ok(H.logs.some((l) => /without running the check/.test(l)))
 })
 
+const SL = loadHelpers(['sliceArgErrors'])
+
+test('sliceArgErrors: valid slices pass clean', () => {
+  assert.deepEqual(SL.sliceArgErrors([
+    { id: 's1', title: 'a', prompt: 'do a', files: ['src/a.js'], done_when: 'a passes' },
+    { id: 's2', title: 'b', prompt: 'do b', files: [], done_when: 'b passes' },
+  ], 15), [])
+})
+
+test('sliceArgErrors: not an array, and an empty array, are each one message', () => {
+  assert.equal(SL.sliceArgErrors('nope', 15).length, 1)
+  assert.equal(SL.sliceArgErrors(null, 15).length, 1)
+  assert.equal(SL.sliceArgErrors([], 15).length, 1)
+})
+
+test('sliceArgErrors: a duplicate id is named in the message', () => {
+  const errs = SL.sliceArgErrors([
+    { id: 's1', title: 'a', prompt: 'p', files: [], done_when: 'd' },
+    { id: 's1', title: 'b', prompt: 'p', files: [], done_when: 'd' },
+  ], 15)
+  assert.ok(errs.some((e) => /repeats id "s1"/.test(e)), errs.join(' | '))
+})
+
+test('sliceArgErrors: a missing prompt is reported', () => {
+  const errs = SL.sliceArgErrors([{ id: 's1', title: 'a', prompt: '  ', files: [], done_when: 'd' }], 15)
+  assert.ok(errs.some((e) => /has no prompt/.test(e)), errs.join(' | '))
+})
+
+test('sliceArgErrors: files must be an array of strings, but empty is fine', () => {
+  const notArray = SL.sliceArgErrors([{ id: 's1', title: 'a', prompt: 'p', files: 'src/a.js', done_when: 'd' }], 15)
+  assert.ok(notArray.some((e) => /needs files/.test(e)), notArray.join(' | '))
+  const badEntry = SL.sliceArgErrors([{ id: 's1', title: 'a', prompt: 'p', files: ['src/a.js', 3], done_when: 'd' }], 15)
+  assert.ok(badEntry.some((e) => /needs files/.test(e)), badEntry.join(' | '))
+  assert.deepEqual(SL.sliceArgErrors([{ id: 's1', title: 'a', prompt: 'p', files: [], done_when: 'd' }], 15), [])
+})
+
+test('sliceArgErrors: more than max is refused, mentioning maxSlices', () => {
+  const errs = SL.sliceArgErrors([
+    { id: 's1', title: 'a', prompt: 'p', files: [], done_when: 'd' },
+    { id: 's2', title: 'b', prompt: 'p', files: [], done_when: 'd' },
+  ], 1)
+  assert.ok(errs.some((e) => /exceed maxSlices/.test(e)), errs.join(' | '))
+})
+
+test('sliceArgErrors: a text field that is not a string is refused rather than coerced to "[object Object]"', () => {
+  const errs = SL.sliceArgErrors([{ id: 1, title: { t: 'x' }, prompt: { text: 'do a' }, files: ['src/a.js'], done_when: ['when a'] }], 15)
+  assert.ok(errs.some((e) => /\(1\) has no title/.test(e)), errs.join(' | '))
+  assert.ok(errs.some((e) => /has no prompt/.test(e)) && errs.some((e) => /has no done_when/.test(e)), errs.join(' | '))
+  assert.ok(errs.every((e) => !/has no id/.test(e)), 'a numeric id is fine: ' + errs.join(' | '))
+  const objId = SL.sliceArgErrors([{ id: { x: 1 }, title: 'a', prompt: 'p', files: [], done_when: 'd' }], 15)
+  assert.ok(objId.some((e) => /has no id/.test(e)), objId.join(' | '))
+})
+
+test('sliceArgErrors: extra fields on a slice are ignored', () => {
+  assert.deepEqual(SL.sliceArgErrors([
+    { id: 's1', title: 'a', prompt: 'p', files: [], done_when: 'd', extra: 'whatever', another: 1 },
+  ], 15), [])
+})
+
 test('timingByPhase sums agent seconds per phase and keeps the lanes', () => {
   const t = H.timingByPhase([{ label: 'a', phase: 'Implement', seconds: 5 }, { label: 'b', phase: 'Implement', seconds: 7 }, { label: 'c', phase: null, seconds: 1 }], 20)
   assert.deepEqual(t.agent_seconds_by_phase, { Implement: 12, other: 1 })

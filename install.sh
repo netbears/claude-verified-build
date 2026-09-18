@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
-# Install (or update) the verified-build skill and its engine into one or more Claude
-# Code config directories. The two files are a pair and must travel together: the skill
-# is only the entry point and drives $CLAUDE_CONFIG_DIR/workflows/build-verify-patch.js.
+# Install (or update) the two verified-build skills and the one engine they both drive
+# into one or more Claude Code config directories. The three files travel together: each
+# skill is only an entry point and drives $CLAUDE_CONFIG_DIR/workflows/build-verify-patch.js.
 #
 #   ./install.sh                      # into $CLAUDE_CONFIG_DIR, or ~/.claude if unset
 #   ./install.sh ~/.claude-work ~/.claude-personal
@@ -13,6 +13,7 @@
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 SKILL="$HERE/skills/verified-build/SKILL.md"
+SKILL_SMALL="$HERE/skills/verified-build-small/SKILL.md"
 ENGINE="$HERE/workflows/build-verify-patch.js"
 
 CHECK=1
@@ -51,19 +52,21 @@ for T in "$@"; do
         '~/'*) RDIR='$HOME'${DIR#\~} ;;
         *) RDIR=$DIR ;;
       esac
-      ssh "$HOST" "mkdir -p \"$RDIR/skills/verified-build\" \"$RDIR/workflows\""
+      ssh "$HOST" "mkdir -p \"$RDIR/skills/verified-build\" \"$RDIR/skills/verified-build-small\" \"$RDIR/workflows\""
       scp -q "$SKILL" "$HOST:$DIR/skills/verified-build/SKILL.md"
+      scp -q "$SKILL_SMALL" "$HOST:$DIR/skills/verified-build-small/SKILL.md"
       scp -q "$ENGINE" "$HOST:$DIR/workflows/build-verify-patch.js"
       echo "installed to $T"
-      ssh "$HOST" "if command -v md5sum >/dev/null 2>&1; then S=md5sum; else S='md5 -r'; fi; \$S \"$RDIR/skills/verified-build/SKILL.md\" \"$RDIR/workflows/build-verify-patch.js\""
+      ssh "$HOST" "if command -v md5sum >/dev/null 2>&1; then S=md5sum; else S='md5 -r'; fi; \$S \"$RDIR/skills/verified-build/SKILL.md\" \"$RDIR/skills/verified-build-small/SKILL.md\" \"$RDIR/workflows/build-verify-patch.js\""
       ;;
     *)
-      mkdir -p "$T/skills/verified-build" "$T/workflows"
+      mkdir -p "$T/skills/verified-build" "$T/skills/verified-build-small" "$T/workflows"
       cp "$SKILL" "$T/skills/verified-build/SKILL.md"
+      cp "$SKILL_SMALL" "$T/skills/verified-build-small/SKILL.md"
       cp "$ENGINE" "$T/workflows/build-verify-patch.js"
-      echo "installed to $T"; $SUM "$T/skills/verified-build/SKILL.md" "$T/workflows/build-verify-patch.js"
+      echo "installed to $T"; $SUM "$T/skills/verified-build/SKILL.md" "$T/skills/verified-build-small/SKILL.md" "$T/workflows/build-verify-patch.js"
       ;;
   esac
 done
-echo "source:"; $SUM "$SKILL" "$ENGINE"
-echo "Every line above should carry the same two digests. Restart the Claude Code session that will use it."
+echo "source:"; $SUM "$SKILL" "$SKILL_SMALL" "$ENGINE"
+echo "Every line above should carry the same three digests. Restart the Claude Code session that will use it."

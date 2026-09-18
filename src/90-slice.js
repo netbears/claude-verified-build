@@ -9,7 +9,24 @@ const PLAN_INDEX = planDoc
     planDoc.tasks.map((t) => '  Task ' + t.n + ' — ' + t.title + ' — files: ' + (t.files || []).join(', ') + ' — lines ' + t.lines).join('\n')
   : (PLAN_PATH ? 'THE PLAN DOCUMENT: ' + PLAN_PATH + ' — read it and index its tasks yourself.' : '')
 
-const plan = await callAgent(
+// The orchestrator's slices go to the implementers as given: the five fields the slicer
+// would have returned, nothing invented on top. uncovered stays empty — scope the
+// orchestrator left out is theirs to know, not a slicer's admission.
+let plan
+if (SLICES_IN) {
+  plan = {
+    shared_context: SHARED_CONTEXT_IN,
+    task_summary: TASK_SUMMARY_IN,
+    slices: SLICES_IN.map((s) => ({
+      id: String(s.id).trim(), title: String(s.title).trim(), prompt: String(s.prompt).trim(),
+      files: (s.files || []).map((f) => String(f).trim()), done_when: String(s.done_when).trim(),
+    })),
+    uncovered: [],
+    notes: [],
+  }
+  log('slices: ' + plan.slices.length + ' from the orchestrator — no slicer lane')
+} else {
+  plan = await callAgent(
   [
     'You are the SLICER. You do not write the implementation — you map the plan\'s tasks onto slices so that several implementers can work at once without colliding.',
     '',
@@ -75,18 +92,37 @@ const plan = await callAgent(
     '',
     'Write no code. Make no commits.',
   ].join('\n'),
-  { label: 'slice', phase: 'Slice', model: JUDGE, effort: EFFORT, schema: PLAN_SCHEMA }
-)
+    { label: 'slice', phase: 'Slice', model: JUDGE, effort: EFFORT, schema: PLAN_SCHEMA }
+  )
+}
 
 if (!plan || !plan.slices || !plan.slices.length) {
   return { ok: false, stage: 'plan', error: 'planner returned no slices', plan, recon: recon }
 }
 
-const SHARED = String(plan.shared_context || '')
+// With the orchestrator's slices no slicer carried Recon's notes into the shared context,
+// so the engine appends them itself: the check command, the layout and the conventions are
+// what every cold implementer would otherwise spend three tool calls rediscovering.
+const RECON_NOTES = SLICES_IN
+  ? [
+    'WHAT RECON ESTABLISHED — trust this and do not re-derive it:',
+    'repo: ' + (recon.ecosystem || 'unknown') + ' on branch ' + (recon.branch || '?') + ' @ ' + BASE.slice(0, 8),
+    (HAS_CHECKS ? 'check command: ' + CHECK_CMD : 'no executable checks: nothing here can be run, so keep every commit small and legible in the diff'),
+    (recon.layout_notes ? 'layout: ' + recon.layout_notes : ''),
+    (recon.conventions ? 'conventions (binding): ' + recon.conventions : ''),
+  ].filter(Boolean).join('\n')
+  : ''
+// The orchestrator's context comes first and is honoured on the slicer path too: the
+// slicer's shared_context is a cold agent's reading of the repo, the orchestrator's is a
+// constraint ("never touch vendor/"), and a constraint silently dropped because the
+// slices were left to the engine is the failure the ignore-out-loud rule exists to stop.
+const SHARED = SLICES_IN
+  ? [SHARED_CONTEXT_IN, RECON_NOTES].filter(Boolean).join('\n\n')
+  : [FROM === 'slices' ? SHARED_CONTEXT_IN : '', String(plan.shared_context || '')].filter(Boolean).join('\n\n')
 // What implementers and patchers see instead of the full task: every agent that carried
 // the whole brief re-read it on every turn (plan C: 53 agents, a 4,200-line plan each).
 // The adversary keeps the full TASK — it is the bar, and the adversary is the judge.
-const TASK_BRIEF = String(plan.task_summary || '').trim() || TASK
+const TASK_BRIEF = (FROM === 'slices' ? TASK_SUMMARY_IN : '') || String(plan.task_summary || '').trim() || TASK
 // Two-dot: literally "everything added between BASE and HEAD". Three-dot would
 // route through merge-base, which is identical while history stays linear and
 // quietly different the moment it does not.
@@ -101,7 +137,8 @@ const groups = groupByFileConflict(plan.slices)
 const biggestGroup = groups.reduce((n, g) => Math.max(n, g.slices.length), 0)
 // The plan block the cost-gate pause, an out-of-budget stop and the final report carry.
 function planReport() {
-  return { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [], notes: plan.notes || [] }
+  return { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [], notes: plan.notes || [],
+    source: SLICES_IN ? 'orchestrator' : 'slicer' }
 }
 log(plan.slices.length + ' slice(s) -> ' + groups.length + ' conflict-free group(s) (largest holds ' +
   biggestGroup + '), up to ' + WAVE + ' group(s) at a time')
@@ -124,7 +161,7 @@ const spentCounts = {
   plan_review: documents.plan_reviews.filter((r) => r.review).length,
   answers: (answersFor('spec').length ? 1 : 0) + (answersFor('plan').length ? 1 : 0),
   plan_index: planReindexed ? 1 : 0,
-  slice: 1,
+  slice: SLICES_IN ? 0 : 1,
 }
 const nSlices = plan.slices.length
 // Measured: the first review raised about one finding per slice; ~60% sat at or above

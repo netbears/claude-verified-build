@@ -753,3 +753,133 @@ test('within a patch group the next patcher starts only after the previous one f
   assert.ok(labels.indexOf('adversary:r1') > labels.indexOf('patch:r0:F2'), 'the re-review runs after the last patcher')
   assert.ok(!labels.some((l) => l.startsWith('verify:')), 'no patch verifier lane')
 })
+
+// ---------------------------------------------------------------------------
+// from:'slices' — the orchestrator hands the engine finished slices and the
+// slicer lane is skipped; without slices under from:'slices' the slicer runs
+// exactly as it does for from:'plan'.
+// ---------------------------------------------------------------------------
+test('from:\'slices\' with the orchestrator\'s slices: no documents, no slicer, straight to the implementers', async () => {
+  const { out, calls, labels } = await run({
+    task: 'Fix the slugify helper', from: 'slices', slices: SLICES,
+    sharedContext: 'ORCH CONTEXT HERE', taskSummary: 'the brief', maxUsd: 60,
+  }, { recon: { ...RECON, conventions: 'commit by pathspec', layout_notes: 'src holds the code' } })
+  assert.equal(out.ok, true)
+  assert.equal(out.paused, false)
+  assert.ok(!labels.some((l) => ['spec', 'plan-doc', 'slice', 'spec-review:r1', 'plan-review:r1'].includes(l)), labels.join(','))
+  assert.ok(labels.includes('impl:s1') && labels.includes('impl:s2') && labels.includes('adversary:r0'))
+  assert.deepEqual(labels.slice(0, 3).sort(), ['probe:opus', 'probe:sonnet', 'recon'])
+  assert.equal(out.plan.source, 'orchestrator')
+  assert.equal(out.models.slice, 'orchestrator')
+  assert.equal(out.estimate, undefined)
+  assert.equal(out.cost.estimate.breakdown['done:slice'], undefined)
+  assert.doesNotMatch(calls.find((c) => c.label === 'recon').prompt, /WHERE THE TASK LANDS/)
+  const impl = calls.find((c) => c.label === 'impl:s1').prompt
+  assert.match(impl, /ORCH CONTEXT HERE/)
+  assert.match(impl, /WHAT RECON ESTABLISHED/)
+  assert.match(impl, /check command: node --test/)
+  assert.match(impl, /conventions \(binding\): commit by pathspec/)
+  assert.match(impl, /layout: src holds the code/)
+  assert.match(impl, /THE TASK IN BRIEF[\s\S]*the brief/)
+  assert.deepEqual(out.plan.slices, SLICES)
+  assert.equal(out.documents.from, 'slices')
+  assert.equal(out.documents.spec, null)
+})
+
+test('from:\'slices\' without taskSummary hands the implementers the full task', async () => {
+  const { out, calls } = await run({ task: 'Fix the slugify helper', from: 'slices', slices: SLICES, maxUsd: 60 })
+  const impl = calls.find((c) => c.label === 'impl:s1').prompt
+  assert.match(impl, /Fix the slugify helper/)
+  assert.match(impl, /WHAT RECON ESTABLISHED/)
+  assert.match(impl, /SHARED CONTEXT:\nWHAT RECON ESTABLISHED/)
+  assert.equal(out.ok, true)
+})
+
+test('from:\'slices\' without slices runs the slicer, as from:\'plan\' does', async () => {
+  const task = 'Fix the slugify helper'
+  const s = await run({ task, from: 'slices' })
+  assert.equal(s.out.stage, 'estimate')
+  assert.deepEqual(s.labels.filter((l) => !l.startsWith('probe:')), ['recon', 'slice'])
+  assert.equal(s.out.plan.source, 'slicer')
+  assert.ok(s.out.estimate.breakdown['done:slice'])
+  const p = await run({ task, from: 'plan' })
+  assert.equal(
+    s.calls.find((c) => c.label === 'slice').prompt,
+    p.calls.find((c) => c.label === 'slice').prompt,
+  )
+})
+
+test('malformed slices are refused before anything is spent', async () => {
+  const dup = [
+    { id: 's1', title: 'a', prompt: 'p', files: ['a.js'], done_when: 'd' },
+    { id: 's1', title: 'b', prompt: 'p', files: ['b.js'], done_when: 'd' },
+  ]
+  await assert.rejects(run({ task: 't', from: 'slices', slices: dup }), /args\.slices — .*repeats id "s1"/)
+  await assert.rejects(
+    run({ task: 't', from: 'slices', slices: [{ id: 's1', title: 'a', prompt: '  ', files: [], done_when: 'd' }] }),
+    /args\.slices — .*has no prompt/,
+  )
+  await assert.rejects(
+    run({
+      task: 't', from: 'slices', maxSlices: 1, slices: [
+        { id: 's1', title: 'a', prompt: 'p', files: ['a.js'], done_when: 'd' },
+        { id: 's2', title: 'b', prompt: 'p', files: ['b.js'], done_when: 'd' },
+      ],
+    }),
+    /exceed maxSlices/,
+  )
+  const calls = []
+  const agent = async (prompt, opts) => { calls.push(opts && opts.label); return { ok: true } }
+  const parallel = (thunks) => Promise.all(thunks.map((fn) => Promise.resolve().then(fn).catch(() => null)))
+  const budget = { total: null, spent: () => 0, remaining: () => Infinity }
+  await assert.rejects(engine({ task: 't', from: 'slices', slices: dup }, agent, parallel, () => {}, () => {}, () => {}, budget))
+  assert.equal(calls.length, 0)
+})
+
+test('slices passed without from:\'slices\' are ignored out loud', async () => {
+  const { out, labels, logs } = await run({ ...BASE_ARGS, slices: SLICES })
+  assert.ok(logs.some((l) => /ignoring args\.slices/.test(l)), logs.join('\n'))
+  assert.ok(labels.includes('spec'))
+  assert.equal(out.plan.source, 'slicer')
+})
+
+test('the cost gate for from:\'slices\': under the ceiling it proceeds, over it pauses, and 0 always pauses', async () => {
+  const args = (extra) => ({ task: 'Fix the slugify helper', from: 'slices', slices: SLICES, ...extra })
+  const under = await run(args({ maxUsd: 60 }))
+  assert.equal(under.out.paused, false)
+  const over = await run(args({ maxUsd: 1 }))
+  assert.equal(over.out.paused, true)
+  assert.equal(over.out.stage, 'estimate')
+  assert.ok(Number.isFinite(over.out.estimate.total_expected_usd))
+  assert.equal(over.out.estimate.breakdown['done:slice'], undefined)
+  const zero = await run(args({ maxUsd: 0 }))
+  assert.equal(zero.out.paused, true)
+})
+
+test('recon gates still apply under from:\'slices\', and the mode reached recon as itself', async () => {
+  const { out, labels, calls } = await run(
+    { task: 'Fix the slugify helper', from: 'slices', slices: SLICES, maxUsd: 60 },
+    { recon: { ...RECON, dirty: true, dirty_summary: ' M a.js' } },
+  )
+  assert.equal(out.stage, 'recon')
+  assert.match(out.error, /dirty/)
+  assert.ok(!labels.some((l) => l.startsWith('impl:')))
+  // An engine that did not know the mode would fall back to 'idea' and interview the repo.
+  assert.doesNotMatch(calls.find((c) => c.label === 'recon').prompt, /WHERE THE TASK LANDS/)
+  const trunk = await run({ task: 'Fix the slugify helper', from: 'slices', slices: SLICES, maxUsd: 60 }, { recon: { ...RECON, is_trunk: true, branch: 'main' } })
+  assert.equal(trunk.out.stage, 'recon')
+  assert.match(trunk.out.error, /trunk/)
+})
+
+test('sharedContext and taskSummary are honoured on the slicer path too, ahead of the slicer\'s own', async () => {
+  const { calls } = await run({ task: 'Fix the slugify helper', from: 'slices', sharedContext: 'ORCH SHARED', taskSummary: 'ORCH BRIEF', maxUsd: 60 })
+  const impl = calls.find((c) => c.label === 'impl:s1').prompt
+  assert.match(impl, /SHARED CONTEXT:\nORCH SHARED\n\nctx\n/, 'the orchestrator\'s context first, the slicer\'s after it')
+  assert.match(impl, /THE TASK IN BRIEF[^\n]*\nORCH BRIEF\n/, 'the orchestrator\'s brief wins over the slicer\'s task_summary')
+  assert.doesNotMatch(impl, /WHAT RECON ESTABLISHED/, 'the slicer carries recon\'s notes itself')
+  const patch = calls.find((c) => c.label === 'patch:r0:F1').prompt
+  assert.match(patch, /ORCH BRIEF/)
+  assert.doesNotMatch(patch, /ORCH SHARED/, 'patchers get the brief only, as in every mode')
+  const { logs } = await run({ ...BASE_ARGS, sharedContext: 'x' })
+  assert.ok(logs.some((l) => /ignoring args\.sharedContext/.test(l)), logs.join('\n'))
+})

@@ -13,7 +13,15 @@ severity, before the result is reported.
 Works on any git repo in any language: the first agent discovers from the repo itself what
 "the checks pass" means, so the engine is never hand-tuned per project.
 
-## How a run looks
+Two skills drive it, one section each below. `/verified-build` starts from an idea, a
+spec or a plan and designs before it builds. `/verified-build-small` starts from slices
+you have already written and runs only the code half: implement, review, patch,
+re-review. Both share the engine, the layout, the install and the measurements that
+shaped the defaults.
+
+## /verified-build: from an idea to reviewed code
+
+### How a run looks
 
 ```mermaid
 flowchart TD
@@ -85,47 +93,7 @@ Four pauses, all of the same shape: the run returns early with `paused:true`, th
 orchestrator asks the user, and the same run resumes with the answer. No prompt before a
 pause mentions the answer, so every earlier agent replays from cache.
 
-## Layout
-
-```
-skills/verified-build/SKILL.md     the entry point: pre-flight, the arguments, the pauses, how to read a result
-workflows/build-verify-patch.js    the engine: one deterministic Workflow script, plain JS, no dependencies — BUILT from src/, do not edit
-src/NN-<part>.js                   the engine's source, one part per concern (knobs, lanes, schemas, doctrine, helpers, estimate, then a part per phase)
-build.js                           assembles src/ into the engine (`node build.js`); `--check` says whether the committed engine is stale
-install.sh                         checks the tools, runs check.sh, copies the pair into Claude config dirs (local or user@host:dir)
-check.sh                           build check, syntax check of the engine, then the tests
-test/helpers.test.js               the pure helpers (path overlap, grouping, prices, the review verdict, timing, the orchestrator's list) in isolation
-test/engine.test.js                the whole engine run against a stubbed runtime: every pause, gate and failure path
-CHANGELOG.md                       what changed, by version
-```
-
-CI runs `./check.sh` on every push (`.gitlab-ci.yml`, and `.github/workflows/check.yml`
-on the mirror).
-
-The two files are a pair and travel together. The names differ on purpose: an
-identically-named workflow would shadow the skill in the registry and skip its pre-flight.
-
-## Install
-
-```
-./install.sh                                   # $CLAUDE_CONFIG_DIR or ~/.claude
-./install.sh ~/.claude-work ~/.claude-personal  # several profiles
-./install.sh cloud:~/.claude-stonks             # a remote box, via scp
-```
-
-Then restart the Claude Code session that will use it (skills are read at session start;
-a resident session on a server is restarted the same way). Every copy should be
-byte-identical; `install.sh` prints the checksums so you can see it.
-
-**What a box needs.** `git` — every lane of a run commits and diffs. `ssh` and `scp` for a
-remote install target. `node` (18 or later) only for `check.sh`, which `install.sh` runs
-before copying anything so a broken engine is never installed (`--no-check` skips it on a
-box without node). No plugin, no package. On an API-key account, the models the engine
-pins — `sonnet` and `opus`, plus `fable` if you raise the document tiers or a lane falls
-back — must be enabled for the organisation; the engine's first phase probes every primary
-for cents and stops with `stage:'probe'` if one is not.
-
-## Use
+### Use
 
 ```
 /verified-build <an idea, a paragraph, a failing test — or the path of a spec or a plan>
@@ -183,6 +151,162 @@ refused in the run log and that lane keeps its default, rather than a typo quiet
 deciding who reviewed your spec. Worth knowing: this is for runs where the **design** is
 the risk — an unfamiliar domain, a migration whose shape you cannot picture. Where the
 risk is in the code, the same money buys more as `maxRounds: 2`.
+
+## /verified-build-small: you write the slices, it builds and attacks them
+
+The second skill, for a change whose design is already done. The orchestrator has
+investigated, can name the files and the observable end state, and writes the slices
+itself; the same engine takes them as given (`from:'slices'`) and runs only the code
+half. **No spec, no plan, no document review, no owner questions, no slicer.** What is
+left is the part that was measured to matter most: Sonnet implements each slice in a
+fresh agent, Opus attacks the whole diff and re-runs the check, Sonnet patches what
+matters, Opus re-attacks, and the leftovers are closed by hand.
+
+### How a small run looks
+
+```mermaid
+flowchart TD
+    I([task + slices, written by the orchestrator]) --> V[Validate<br/>every slice has a unique id, a title, a prompt, a done-when and a list of files; at most maxSlices — refused before anything is spent]
+    V --> PB[Probe<br/>one tool-free call each for sonnet and opus: usable from this account?]
+    PB --> R[Recon<br/><i>sonnet</i>: git state, ecosystem, the one check command — run once, time-capped; no idea interview, no owner questions]
+    R --> S{slices<br/>given?}
+    S -- yes --> N[Shared context<br/>the orchestrator's, with Recon's check command, layout and conventions appended by the engine]
+    S -- no --> SL[Slice<br/><i>opus</i> cuts the task, as it would for from:'plan'; the orchestrator's context still goes first]
+    N --> C{cost gate<br/>expected total within maxUsd? the skill passes 60}
+    SL --> C
+    C -- within --> IM[Implement<br/><i>sonnet</i>, one fresh agent per slice, TDD, chains serialised, groups in parallel]
+    C -- above --> P[[pause · show the figure · resume with approveEstimate]]
+    P --> IM
+    IM --> A[Adversarial review<br/><i>opus</i> reads the whole diff, re-runs the check, hunts for what no slice did]
+    A --> F{findings?}
+    F -- none --> DONE([result])
+    F -- critical / major --> PT[Patch<br/><i>sonnet</i> per finding, grouped by file, root cause first]
+    PT --> A2[Re-review<br/><i>opus</i>: reads every patch diff, re-runs the check: closed, and nothing broken?]
+    A2 --> DONE
+    F -- minor --> DONE
+    DONE --> O[Orchestrator closes every leftover by hand, then reports:<br/>the decisions it took writing the slices, verdict, leftovers, cost]
+```
+
+| Stage | Model | What it produces | Gate |
+|---|---|---|---|
+| Validate | — | the orchestrator's slices checked mechanically: unique ids, every text field a non-empty string, `files` a list of paths (empty means an unknown footprint, run alone), at most `maxSlices` | malformed → refused with the slice named, nothing spent |
+| Probe | sonnet, opus | one trivial answer per pinned model | a model this account cannot use → stop, for cents |
+| Recon | Sonnet | git state, ecosystem, the one check command (the fastest real one, run once under a time cap); no idea interview | not a repo, dirty tree or the trunk → stop |
+| Slice | Opus | **only when `slices` is omitted**: the task cut into file-disjoint slices, as for `from:'plan'` | |
+| Cost gate | — | the same estimate as the full run, minus the document rows; `plan.source` says who cut the slices | passes without pausing when the total is within `maxUsd` (the skill passes 60); above it, **pause** |
+| Implement | Sonnet | one fresh agent per slice; a commit each; the shared context carries the orchestrator's notes and Recon's | |
+| Adversarial review | Opus | the whole diff read, the check re-run, the implementers' reports judged as claims; findings with a concrete failure scenario, or `clean:true` | a review that did not run the check is never clean |
+| Patch (1 round) | Sonnet | critical and major findings only, grouped by file | |
+| Re-review | Opus | every patch diff read, the check re-run: closed? and did the patches introduce anything? | |
+| Orchestrator | you | closes every leftover at every severity by hand, then reports; the decisions behind the build are the ones you took writing the slices, so say them | |
+
+`ok` is the same mechanical verdict as the full run. The result has no documents block
+(`documents.from` is `'slices'` and the rest is empty), `plan.source` is
+`'orchestrator'` or `'slicer'`, and `plan.uncovered` can only be non-empty when the
+slicer ran: scope the orchestrator left out of its own slices is the orchestrator's to
+know.
+
+### How to trigger it
+
+```
+/verified-build-small <the task, with the files and the end state you already know>
+```
+
+The orchestrator then does the work the full run's spec and plan lanes would have done,
+in the session: greps the names the task mentions, opens the files, and writes one slice
+per file-disjoint piece of work, each with a self-contained prompt and a complete list of
+the files it will touch. It states the expected cost in the launch message and turns the
+invocation into
+
+```js
+Workflow({ name: 'build-verify-patch', args: {
+  from: 'slices',
+  task: 'Add a --since flag to the export command: ISO dates only, tested, docs updated.',
+  slices: [
+    { id: 's1', title: 'parse --since', prompt: '…', files: ['src/cli.py', 'tests/test_cli.py'], done_when: '…' },
+    { id: 's2', title: 'filter export rows', prompt: '…', files: ['src/export.py', 'tests/test_export.py'], done_when: '…' },
+  ],
+  sharedContext: '<where things live, what not to touch, the naming rule>',
+  taskSummary: '<optional, at most ~250 words: the brief implementers get instead of task>',
+  maxUsd: 60,
+} })
+```
+
+`task` is the bar the adversary holds the work to, so every hard constraint goes there.
+Implementers see the brief (`taskSummary`, or the full `task` without one), the shared
+context and their own slice, nothing else; patchers see the brief only. Slices that
+declare a common file run one after another, each in its own fresh agent; a file an
+implementer touched outside its slice that another slice had declared is reported and
+held against the run. The engine appends Recon's check command, layout notes and
+conventions to `sharedContext`, so the orchestrator does not repeat those. Omit
+`slices` and the Opus slicer cuts the task instead (one more lane, about USD 2); the
+orchestrator's `sharedContext` and `taskSummary` are honoured on that path too, ahead
+of the slicer's own. `slices`, `sharedContext` or `taskSummary` passed under another
+`from` are ignored, and the run log says so.
+
+**What it costs.** At API list prices from the engine's own profile: Recon about USD 2,
+each implementer about USD 3, each Opus review pass about USD 12 (there are two), each
+patched finding about USD 3. Three slices with one patch round come to about USD 40,
+five to about USD 50; the two review passes dominate either way. The skill passes
+`maxUsd:60`, so a run within that proceeds without a round trip and the orchestrator
+says the figure at launch; above it, the run pauses at the cost gate exactly as the full
+one does. Pass the user's own ceiling as `maxUsd` when they named one.
+
+### Which one to reach for
+
+| | `/verified-build` | `/verified-build-small` |
+|---|---|---|
+| you have | an idea, a paragraph, a failing test | the files, the change and the end state, already investigated |
+| the risk is in | the design | the code |
+| who decides the split | Sonnet writes the spec and plan, Opus attacks each, Opus slices | you, in the session; Opus slices only if you decline to |
+| owner questions | Recon, the spec writer and the plan writer may pause to ask | none: there is no idea stage to raise them |
+| cost gate | always pauses | passes within `maxUsd:60`, pauses above |
+| at list prices, five slices | about USD 101 (USD 53 documents, USD 48 code) | about USD 50 |
+
+Neither is for a one-line fix, and neither is for a user who wants to steer each step:
+both run headless in the background.
+
+## Layout
+
+```
+skills/verified-build/SKILL.md     the entry point: pre-flight, the arguments, the pauses, how to read a result
+skills/verified-build-small/SKILL.md   the small entry point: you write the slices; no spec, no plan, no slicer
+workflows/build-verify-patch.js    the engine: one deterministic Workflow script, plain JS, no dependencies — BUILT from src/, do not edit
+src/NN-<part>.js                   the engine's source, one part per concern (knobs, lanes, schemas, doctrine, helpers, estimate, then a part per phase)
+build.js                           assembles src/ into the engine (`node build.js`); `--check` says whether the committed engine is stale
+install.sh                         checks the tools, runs check.sh, copies the pair into Claude config dirs (local or user@host:dir)
+check.sh                           build check, syntax check of the engine, then the tests
+test/helpers.test.js               the pure helpers (path overlap, grouping, prices, the review verdict, timing, the orchestrator's list) in isolation
+test/engine.test.js                the whole engine run against a stubbed runtime: every pause, gate and failure path
+CHANGELOG.md                       what changed, by version
+```
+
+CI runs `./check.sh` on every push (`.gitlab-ci.yml`, and `.github/workflows/check.yml`
+on the mirror).
+
+The three files are a pair and travel together. The names differ on purpose: an
+identically-named workflow would shadow a skill in the registry and skip its pre-flight.
+
+## Install
+
+```
+./install.sh                                   # $CLAUDE_CONFIG_DIR or ~/.claude
+./install.sh ~/.claude-work ~/.claude-personal  # several profiles
+./install.sh cloud:~/.claude-stonks             # a remote box, via scp
+```
+
+`install.sh` copies both skills and the engine — three files, three checksums. Then
+restart the Claude Code session that will use it (skills are read at session start;
+a resident session on a server is restarted the same way). Every copy should be
+byte-identical; `install.sh` prints the checksums so you can see it.
+
+**What a box needs.** `git` — every lane of a run commits and diffs. `ssh` and `scp` for a
+remote install target. `node` (18 or later) only for `check.sh`, which `install.sh` runs
+before copying anything so a broken engine is never installed (`--no-check` skips it on a
+box without node). No plugin, no package. On an API-key account, the models the engine
+pins — `sonnet` and `opus`, plus `fable` if you raise the document tiers or a lane falls
+back — must be enabled for the organisation; the engine's first phase probes every primary
+for cents and stops with `stage:'probe'` if one is not.
 
 ## What it costs and where the time goes
 

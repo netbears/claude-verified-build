@@ -80,7 +80,7 @@ return {
     // the first four of these, and a result that named the default would misreport which
     // model reviewed the spec.
     spec: DOC_WRITER, plan: DOC_WRITER, doc_review: DOC_JUDGE, owner_answers: DOC_JUDGE,
-    implement: CODER, review: JUDGE, slice: JUDGE, recon: CODER, probed: PRIMARY_MODELS,
+    implement: CODER, review: JUDGE, slice: SLICES_IN ? 'orchestrator' : JUDGE, recon: CODER, probed: PRIMARY_MODELS,
     effort: EFFORT, max_concurrent: WAVE,
     // Lanes whose primary model returned nothing and were re-run once on the other
     // tier. A verdict from a fallback lane is still a verdict, but say which model gave it.

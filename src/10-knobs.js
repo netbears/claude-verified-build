@@ -23,7 +23,9 @@ const PATCH_SEVERITY = ['critical', 'major', 'minor'].includes(input.patchSeveri
 // Where the run starts. 'idea': task is a paragraph, a prompt, a test, an idea — the engine
 // writes the spec and the plan itself. 'spec': task is (or names the path of) a finished spec —
 // skip straight to the plan. 'plan': task is (or names) a finished, reviewed plan — slice it.
-const FROM = ['idea', 'spec', 'plan'].includes(input.from) ? input.from : 'idea'
+// 'slices': the orchestrator hands the engine finished slices in args.slices (the
+// /verified-build-small skill) — no documents, and no slicer when slices are given.
+const FROM = ['idea', 'spec', 'plan', 'slices'].includes(input.from) ? input.from : 'idea'
 // Adversarial review rounds on each document the engine writes (0 = write, do not review).
 const DOC_ROUNDS = Number.isInteger(input.docRounds) ? Math.max(0, Math.min(input.docRounds, 2)) : 1
 // Where the documents go; Recon reports the repo's own convention when it has one, and these
@@ -69,6 +71,24 @@ const PAUSE_FOR_OWNER = input.pauseForOwner !== false
 // happened to pass them in must not decide whether the author runs again.
 const ANSWERS = parseAnswers(input.answers)
 const MAX_SLICES = Number(input.maxSlices) > 0 ? Math.min(Number(input.maxSlices), 20) : 15
+// from:'slices' — the orchestrator (Opus, with the repo already in its context) hands the
+// engine finished slices and the slicer lane is skipped; a separate slicer would be the same
+// model paid again to rediscover cold what the orchestrator already knows. Without them the
+// slicer cuts the task as it does for from:'plan'. Checked HERE, before the probe: a malformed
+// slice is an argument error, not something to discover after Recon has been paid for.
+const SLICES_IN = FROM === 'slices' && input.slices != null ? input.slices : null
+if (SLICES_IN !== null) {
+  const sliceErrors = sliceArgErrors(SLICES_IN, MAX_SLICES)
+  if (sliceErrors.length) throw new Error('build-verify-patch: args.slices — ' + sliceErrors.join('; '))
+}
+if (FROM !== 'slices' && input.slices != null) log('ignoring args.slices: slices are read only when from:"slices"')
+// What the orchestrator wants every implementer to know (patchers get only the brief, as
+// in every mode), and the brief implementers and patchers get instead of the full task.
+// Both optional; both read only under from:'slices', with or without the orchestrator's
+// slices — when the slicer runs, the orchestrator's context is put ahead of the slicer's.
+const SHARED_CONTEXT_IN = String(input.sharedContext || '').trim()
+const TASK_SUMMARY_IN = String(input.taskSummary || '').trim()
+if (FROM !== 'slices' && (SHARED_CONTEXT_IN || TASK_SUMMARY_IN)) log('ignoring args.sharedContext / args.taskSummary: read only when from:"slices"')
 const MAX_PATCH_PER_ROUND = 15
 const CODER = 'sonnet'
 const JUDGE = 'opus'

@@ -115,6 +115,36 @@ function groupByFileConflict(slices) {
     .map((g) => ({ slices: g.entries.map((e) => e.slice), files: g.files, exclusive: g.files.size === 0 }))
 }
 
+// The orchestrator's slices (from:'slices') are checked here before anything is spent: a
+// malformed slice is an argument error, not a lane's. Returns one message per problem,
+// empty when the list is usable. The text fields must BE strings, not merely coerce to
+// one: `String({text:'do a'})` is "[object Object]", and an implementer plus two review
+// passes would be paid to build from it. `id` may also be a number (s1 or 1). `files` may
+// be empty (an unknown footprint runs alone), but it must be a list of strings; extra
+// fields are ignored.
+function sliceArgErrors(raw, max) {
+  if (!Array.isArray(raw)) return ['slices must be an array of {id, title, prompt, files, done_when}']
+  if (!raw.length) return ['slices is empty']
+  const out = []
+  if (raw.length > max) out.push(raw.length + ' slices exceed maxSlices (' + max + ', which the engine caps at 20): this is not a small build')
+  const seen = new Set()
+  raw.forEach((s, i) => {
+    const at = 'slices[' + i + ']'
+    if (!s || typeof s !== 'object' || Array.isArray(s)) { out.push(at + ' is not an object'); return }
+    const id = typeof s.id === 'string' || typeof s.id === 'number' ? String(s.id).trim() : ''
+    if (!id) out.push(at + ' has no id (a string or a number)')
+    else if (seen.has(id)) out.push(at + ' repeats id "' + id + '"')
+    seen.add(id)
+    for (const k of ['title', 'prompt', 'done_when']) {
+      if (typeof s[k] !== 'string' || !s[k].trim()) out.push(at + (id ? ' (' + id + ')' : '') + ' has no ' + k + ' (a non-empty string)')
+    }
+    if (!Array.isArray(s.files) || s.files.some((f) => typeof f !== 'string' || !f.trim())) {
+      out.push(at + (id ? ' (' + id + ')' : '') + ' needs files: an array of repo-relative path strings (empty is allowed and means an unknown footprint)')
+    }
+  })
+  return out
+}
+
 // After the implement phase: every file an implementer reports touching that is outside
 // its declared set AND inside another group's declared set was edited while that group
 // may have been live in the same tree. That is the collision the grouping exists to

@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.8.0 — 2026-09-18
+
+**A second skill, `/verified-build-small`, for a change whose design is already done.**
+The orchestrator writes the slices and the engine's new `from:'slices'` mode takes them
+as given: no spec, no plan, no slicer; Probe, Recon (no idea interview, the same three
+gates), the cost gate, then implement, adversarial review, one patch round and the
+re-review on the unchanged code lanes. Why: the orchestrator is Opus with the repo
+already in context; a slicer lane is the same model paid again to rediscover it cold
+(~USD 2), and the document half (~USD 53) buys nothing when the blast radius fits in
+one sentence. Slices are validated before the probe (`sliceArgErrors`: id, title,
+prompt, files, done_when; unique ids; at most `maxSlices`), and a bad one is refused
+with a message naming it and nothing spent. Recon's check command, layout and
+conventions are appended to the orchestrator's `sharedContext` by the engine, so
+implementers do not rediscover them. `plan.source` and `models.slice` say
+`'orchestrator'` when no slicer ran, the slice row is not priced, and `slices`,
+`sharedContext` or `taskSummary` passed under another `from` are ignored out loud. When
+the slicer runs because `slices` was omitted, the orchestrator's `sharedContext` and
+`taskSummary` are still honoured, ahead of the slicer's own, so a constraint is not
+dropped for leaving the split to the engine. The validator refuses a text field that is
+not a string rather than coercing it: `String({text:'do a'})` is "[object Object]", and an
+implementer and two review passes would have been paid to build from it. Every existing prompt is byte-identical, so a
+run in flight resumes from cache. The small skill passes `maxUsd:60` by default: three
+slices are about USD 40 at list prices, five about USD 50, dominated by the two Opus
+review passes; above the ceiling the gate pauses as before. `install.sh` installs both
+skills. Tests: the orchestrator-slices path end to end, the slicer fallback with a
+byte-identical slicer prompt, the refusals, the ignored `slices` under `from:'idea'`,
+the gate under and over the ceiling, the Recon gates, and the helper in isolation.
+
 ## v1.7.1 — 2026-09-18
 
 **The engine is developed as parts and built into one file.** `workflows/build-verify-patch.js`

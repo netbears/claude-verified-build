@@ -1,7 +1,7 @@
 export const meta = {
   name: 'build-verify-patch',
   description: 'From an idea: Sonnet writes the spec and Opus reviews and folds it in; the same for the plan; then Sonnet implements in waves of 15, Opus adversarially reviews the combined diff and re-runs the repo\'s check, and one patch round closes critical/major findings',
-  whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix.',
+  whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix. With from:\'slices\' (the /verified-build-small skill) the orchestrator supplies the slices itself: no spec, no plan, no slicer — implement, review, patch, re-review.',
   phases: [
     { title: 'Probe', detail: 'one trivial call per primary model: is each of them enabled for this account?' },
     { title: 'Recon', detail: 'sonnet reads the repo: git state, ecosystem, how it verifies itself, where the idea lands, what the owner must decide first', model: 'sonnet' },

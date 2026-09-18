@@ -1,7 +1,7 @@
 export const meta = {
   name: 'build-verify-patch',
   description: 'From an idea: Sonnet writes the spec and Opus reviews and folds it in; the same for the plan; then Sonnet implements in waves of 15, Opus adversarially reviews the combined diff and re-runs the repo\'s check, and one patch round closes critical/major findings',
-  whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix.',
+  whenToUse: 'A multi-file feature, refactor, migration or non-trivial bugfix where you want the code written cheaply, verified by a model that did not write it, and attacked before you trust it. Works on any git repo in any language. Overkill for a one-line fix. With from:\'slices\' (the /verified-build-small skill) the orchestrator supplies the slices itself: no spec, no plan, no slicer — implement, review, patch, re-review.',
   phases: [
     { title: 'Probe', detail: 'one trivial call per primary model: is each of them enabled for this account?' },
     { title: 'Recon', detail: 'sonnet reads the repo: git state, ecosystem, how it verifies itself, where the idea lands, what the owner must decide first', model: 'sonnet' },
@@ -48,7 +48,9 @@ const PATCH_SEVERITY = ['critical', 'major', 'minor'].includes(input.patchSeveri
 // Where the run starts. 'idea': task is a paragraph, a prompt, a test, an idea — the engine
 // writes the spec and the plan itself. 'spec': task is (or names the path of) a finished spec —
 // skip straight to the plan. 'plan': task is (or names) a finished, reviewed plan — slice it.
-const FROM = ['idea', 'spec', 'plan'].includes(input.from) ? input.from : 'idea'
+// 'slices': the orchestrator hands the engine finished slices in args.slices (the
+// /verified-build-small skill) — no documents, and no slicer when slices are given.
+const FROM = ['idea', 'spec', 'plan', 'slices'].includes(input.from) ? input.from : 'idea'
 // Adversarial review rounds on each document the engine writes (0 = write, do not review).
 const DOC_ROUNDS = Number.isInteger(input.docRounds) ? Math.max(0, Math.min(input.docRounds, 2)) : 1
 // Where the documents go; Recon reports the repo's own convention when it has one, and these
@@ -94,6 +96,24 @@ const PAUSE_FOR_OWNER = input.pauseForOwner !== false
 // happened to pass them in must not decide whether the author runs again.
 const ANSWERS = parseAnswers(input.answers)
 const MAX_SLICES = Number(input.maxSlices) > 0 ? Math.min(Number(input.maxSlices), 20) : 15
+// from:'slices' — the orchestrator (Opus, with the repo already in its context) hands the
+// engine finished slices and the slicer lane is skipped; a separate slicer would be the same
+// model paid again to rediscover cold what the orchestrator already knows. Without them the
+// slicer cuts the task as it does for from:'plan'. Checked HERE, before the probe: a malformed
+// slice is an argument error, not something to discover after Recon has been paid for.
+const SLICES_IN = FROM === 'slices' && input.slices != null ? input.slices : null
+if (SLICES_IN !== null) {
+  const sliceErrors = sliceArgErrors(SLICES_IN, MAX_SLICES)
+  if (sliceErrors.length) throw new Error('build-verify-patch: args.slices — ' + sliceErrors.join('; '))
+}
+if (FROM !== 'slices' && input.slices != null) log('ignoring args.slices: slices are read only when from:"slices"')
+// What the orchestrator wants every implementer to know (patchers get only the brief, as
+// in every mode), and the brief implementers and patchers get instead of the full task.
+// Both optional; both read only under from:'slices', with or without the orchestrator's
+// slices — when the slicer runs, the orchestrator's context is put ahead of the slicer's.
+const SHARED_CONTEXT_IN = String(input.sharedContext || '').trim()
+const TASK_SUMMARY_IN = String(input.taskSummary || '').trim()
+if (FROM !== 'slices' && (SHARED_CONTEXT_IN || TASK_SUMMARY_IN)) log('ignoring args.sharedContext / args.taskSummary: read only when from:"slices"')
 const MAX_PATCH_PER_ROUND = 15
 const CODER = 'sonnet'
 const JUDGE = 'opus'
@@ -730,6 +750,36 @@ function groupByFileConflict(slices) {
     .map((g) => ({ ...g, entries: g.entries.sort((a, b) => a.index - b.index) }))
     .sort((a, b) => a.entries[0].index - b.entries[0].index)
     .map((g) => ({ slices: g.entries.map((e) => e.slice), files: g.files, exclusive: g.files.size === 0 }))
+}
+
+// The orchestrator's slices (from:'slices') are checked here before anything is spent: a
+// malformed slice is an argument error, not a lane's. Returns one message per problem,
+// empty when the list is usable. The text fields must BE strings, not merely coerce to
+// one: `String({text:'do a'})` is "[object Object]", and an implementer plus two review
+// passes would be paid to build from it. `id` may also be a number (s1 or 1). `files` may
+// be empty (an unknown footprint runs alone), but it must be a list of strings; extra
+// fields are ignored.
+function sliceArgErrors(raw, max) {
+  if (!Array.isArray(raw)) return ['slices must be an array of {id, title, prompt, files, done_when}']
+  if (!raw.length) return ['slices is empty']
+  const out = []
+  if (raw.length > max) out.push(raw.length + ' slices exceed maxSlices (' + max + ', which the engine caps at 20): this is not a small build')
+  const seen = new Set()
+  raw.forEach((s, i) => {
+    const at = 'slices[' + i + ']'
+    if (!s || typeof s !== 'object' || Array.isArray(s)) { out.push(at + ' is not an object'); return }
+    const id = typeof s.id === 'string' || typeof s.id === 'number' ? String(s.id).trim() : ''
+    if (!id) out.push(at + ' has no id (a string or a number)')
+    else if (seen.has(id)) out.push(at + ' repeats id "' + id + '"')
+    seen.add(id)
+    for (const k of ['title', 'prompt', 'done_when']) {
+      if (typeof s[k] !== 'string' || !s[k].trim()) out.push(at + (id ? ' (' + id + ')' : '') + ' has no ' + k + ' (a non-empty string)')
+    }
+    if (!Array.isArray(s.files) || s.files.some((f) => typeof f !== 'string' || !f.trim())) {
+      out.push(at + (id ? ' (' + id + ')' : '') + ' needs files: an array of repo-relative path strings (empty is allowed and means an unknown footprint)')
+    }
+  })
+  return out
 }
 
 // After the implement phase: every file an implementer reports touching that is outside
@@ -1693,7 +1743,24 @@ const PLAN_INDEX = planDoc
     planDoc.tasks.map((t) => '  Task ' + t.n + ' — ' + t.title + ' — files: ' + (t.files || []).join(', ') + ' — lines ' + t.lines).join('\n')
   : (PLAN_PATH ? 'THE PLAN DOCUMENT: ' + PLAN_PATH + ' — read it and index its tasks yourself.' : '')
 
-const plan = await callAgent(
+// The orchestrator's slices go to the implementers as given: the five fields the slicer
+// would have returned, nothing invented on top. uncovered stays empty — scope the
+// orchestrator left out is theirs to know, not a slicer's admission.
+let plan
+if (SLICES_IN) {
+  plan = {
+    shared_context: SHARED_CONTEXT_IN,
+    task_summary: TASK_SUMMARY_IN,
+    slices: SLICES_IN.map((s) => ({
+      id: String(s.id).trim(), title: String(s.title).trim(), prompt: String(s.prompt).trim(),
+      files: (s.files || []).map((f) => String(f).trim()), done_when: String(s.done_when).trim(),
+    })),
+    uncovered: [],
+    notes: [],
+  }
+  log('slices: ' + plan.slices.length + ' from the orchestrator — no slicer lane')
+} else {
+  plan = await callAgent(
   [
     'You are the SLICER. You do not write the implementation — you map the plan\'s tasks onto slices so that several implementers can work at once without colliding.',
     '',
@@ -1759,18 +1826,37 @@ const plan = await callAgent(
     '',
     'Write no code. Make no commits.',
   ].join('\n'),
-  { label: 'slice', phase: 'Slice', model: JUDGE, effort: EFFORT, schema: PLAN_SCHEMA }
-)
+    { label: 'slice', phase: 'Slice', model: JUDGE, effort: EFFORT, schema: PLAN_SCHEMA }
+  )
+}
 
 if (!plan || !plan.slices || !plan.slices.length) {
   return { ok: false, stage: 'plan', error: 'planner returned no slices', plan, recon: recon }
 }
 
-const SHARED = String(plan.shared_context || '')
+// With the orchestrator's slices no slicer carried Recon's notes into the shared context,
+// so the engine appends them itself: the check command, the layout and the conventions are
+// what every cold implementer would otherwise spend three tool calls rediscovering.
+const RECON_NOTES = SLICES_IN
+  ? [
+    'WHAT RECON ESTABLISHED — trust this and do not re-derive it:',
+    'repo: ' + (recon.ecosystem || 'unknown') + ' on branch ' + (recon.branch || '?') + ' @ ' + BASE.slice(0, 8),
+    (HAS_CHECKS ? 'check command: ' + CHECK_CMD : 'no executable checks: nothing here can be run, so keep every commit small and legible in the diff'),
+    (recon.layout_notes ? 'layout: ' + recon.layout_notes : ''),
+    (recon.conventions ? 'conventions (binding): ' + recon.conventions : ''),
+  ].filter(Boolean).join('\n')
+  : ''
+// The orchestrator's context comes first and is honoured on the slicer path too: the
+// slicer's shared_context is a cold agent's reading of the repo, the orchestrator's is a
+// constraint ("never touch vendor/"), and a constraint silently dropped because the
+// slices were left to the engine is the failure the ignore-out-loud rule exists to stop.
+const SHARED = SLICES_IN
+  ? [SHARED_CONTEXT_IN, RECON_NOTES].filter(Boolean).join('\n\n')
+  : [FROM === 'slices' ? SHARED_CONTEXT_IN : '', String(plan.shared_context || '')].filter(Boolean).join('\n\n')
 // What implementers and patchers see instead of the full task: every agent that carried
 // the whole brief re-read it on every turn (plan C: 53 agents, a 4,200-line plan each).
 // The adversary keeps the full TASK — it is the bar, and the adversary is the judge.
-const TASK_BRIEF = String(plan.task_summary || '').trim() || TASK
+const TASK_BRIEF = (FROM === 'slices' ? TASK_SUMMARY_IN : '') || String(plan.task_summary || '').trim() || TASK
 // Two-dot: literally "everything added between BASE and HEAD". Three-dot would
 // route through merge-base, which is identical while history stays linear and
 // quietly different the moment it does not.
@@ -1785,7 +1871,8 @@ const groups = groupByFileConflict(plan.slices)
 const biggestGroup = groups.reduce((n, g) => Math.max(n, g.slices.length), 0)
 // The plan block the cost-gate pause, an out-of-budget stop and the final report carry.
 function planReport() {
-  return { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [], notes: plan.notes || [] }
+  return { slices: plan.slices, groups: groups.length, largest_group: biggestGroup, uncovered: plan.uncovered || [], notes: plan.notes || [],
+    source: SLICES_IN ? 'orchestrator' : 'slicer' }
 }
 log(plan.slices.length + ' slice(s) -> ' + groups.length + ' conflict-free group(s) (largest holds ' +
   biggestGroup + '), up to ' + WAVE + ' group(s) at a time')
@@ -1808,7 +1895,7 @@ const spentCounts = {
   plan_review: documents.plan_reviews.filter((r) => r.review).length,
   answers: (answersFor('spec').length ? 1 : 0) + (answersFor('plan').length ? 1 : 0),
   plan_index: planReindexed ? 1 : 0,
-  slice: 1,
+  slice: SLICES_IN ? 0 : 1,
 }
 const nSlices = plan.slices.length
 // Measured: the first review raised about one finding per slice; ~60% sat at or above
@@ -2297,7 +2384,7 @@ return {
     // the first four of these, and a result that named the default would misreport which
     // model reviewed the spec.
     spec: DOC_WRITER, plan: DOC_WRITER, doc_review: DOC_JUDGE, owner_answers: DOC_JUDGE,
-    implement: CODER, review: JUDGE, slice: JUDGE, recon: CODER, probed: PRIMARY_MODELS,
+    implement: CODER, review: JUDGE, slice: SLICES_IN ? 'orchestrator' : JUDGE, recon: CODER, probed: PRIMARY_MODELS,
     effort: EFFORT, max_concurrent: WAVE,
     // Lanes whose primary model returned nothing and were re-run once on the other
     // tier. A verdict from a fallback lane is still a verdict, but say which model gave it.
