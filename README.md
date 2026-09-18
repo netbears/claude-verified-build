@@ -89,9 +89,11 @@ pause mentions the answer, so every earlier agent replays from cache.
 
 ```
 skills/verified-build/SKILL.md     the entry point: pre-flight, the arguments, the pauses, how to read a result
-workflows/build-verify-patch.js    the engine: one deterministic Workflow script, plain JS, no dependencies
+workflows/build-verify-patch.js    the engine: one deterministic Workflow script, plain JS, no dependencies — BUILT from src/, do not edit
+src/NN-<part>.js                   the engine's source, one part per concern (knobs, lanes, schemas, doctrine, helpers, estimate, then a part per phase)
+build.js                           assembles src/ into the engine (`node build.js`); `--check` says whether the committed engine is stale
 install.sh                         checks the tools, runs check.sh, copies the pair into Claude config dirs (local or user@host:dir)
-check.sh                           syntax check of the engine, then the tests
+check.sh                           build check, syntax check of the engine, then the tests
 test/helpers.test.js               the pure helpers (path overlap, grouping, prices, the review verdict, timing, the orchestrator's list) in isolation
 test/engine.test.js                the whole engine run against a stubbed runtime: every pause, gate and failure path
 CHANGELOG.md                       what changed, by version

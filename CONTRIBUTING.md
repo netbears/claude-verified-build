@@ -4,16 +4,29 @@ The pair is small on purpose: one skill file, one engine file. Most changes are 
 edit, a knob, or a row in the token profile. This is how to make one without breaking the
 copies that run it.
 
+The engine file is **built**. Its source is the parts under `src/`, one per concern —
+`10-knobs.js` (args → constants), `20-lanes.js` (`callAgent`, fallbacks, waves),
+`30-schemas.js`, `40-doctrine.js`, `50-helpers.js` (the pure functions the helper tests
+pull out), `60-estimate.js` (the token profile and prices), then one part per phase
+(`70-recon.js`, `80-documents.js`, `90-slice.js`, `92-implement.js`, `94-review.js`,
+`96-report.js`). `node build.js` concatenates them, in name order, into
+`workflows/build-verify-patch.js`, which stays committed because the Workflow runtime
+takes one self-contained script and `install.sh` copies one file. The parts share one
+scope: a `const` is visible to every part after it, a function to every part. Edit a
+part, never the built file — `check.sh` fails when the two disagree.
+
 ## The shape of a change
 
 1. **Edit in a clone of this repo**, never in a profile's copy. Profiles are installs.
+   Edit under `src/` and run `node build.js`; commit the rebuilt engine with the part.
 2. **Keep the two files in step.** A knob that exists in the engine but not in
    `SKILL.md`'s argument table is a knob nobody uses; a result field the skill tells the
    orchestrator to read must exist in the engine's return value. Check both before you
    commit.
-3. **Run `./check.sh`.** It wraps the engine body in a function before `node --check`,
-   because the script's top-level `return` is a Workflow-runtime feature that bare
-   `node --check` rejects, then runs the tests. Keep `export const meta = {…}` at the
+3. **Run `./check.sh`.** It first checks that the committed engine is what `src/`
+   builds, then wraps the engine body in a function before `node --check`, because the
+   script's top-level `return` is a Workflow-runtime feature that bare `node --check`
+   rejects, then runs the tests. Keep `export const meta = {…}` at the
    top level and a pure literal: no variables, calls, spreads or template strings inside it.
    **Write the test first.** `test/helpers.test.js` pulls every pure helper out of the
    engine by name (keep each one a top-level `function name(...) {}`), and
@@ -52,6 +65,10 @@ copies that run it.
   else and keep the attribution in `LICENSE.md`.
 - **2-space indent** in the engine. Imports from other machines have arrived re-indented;
   fix that before merging, never copy over.
+- **Prompts are cache keys.** A resume replays an `agent()` call only while its prompt and
+  options are byte-identical, so a refactor that must not disturb in-flight runs keeps every
+  prompt string exactly as it was (v1.7.1 was checked that way: same calls, results and logs
+  from the old and the new engine under a stubbed runtime).
 
 ## Changing the numbers
 

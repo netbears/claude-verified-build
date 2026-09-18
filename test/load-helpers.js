@@ -2,6 +2,9 @@
 // `args` global and calls runtime hooks (agent, log, phase). Its pure helpers are still
 // plain functions, so the tests pull them out of the source by name and evaluate them
 // with a stub `log`. Keep every helper a top-level `function name(...) { ... }`.
+// The source read here is the BUILT engine (workflows/build-verify-patch.js, assembled
+// by build.js from src/), because that is the file that ships and runs; check.sh fails
+// before the tests when it is stale against src/.
 'use strict'
 const fs = require('fs')
 const path = require('path')

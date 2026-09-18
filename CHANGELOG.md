@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.7.1 — 2026-09-18
+
+**The engine is developed as parts and built into one file.** `workflows/build-verify-patch.js`
+had grown to 2,265 lines in one scroll — knobs, lanes, schemas, doctrine, helpers, the
+token profile and six phases — so any change meant finding its place in the whole. The
+source now lives under `src/`, one part per concern (`10-knobs`, `20-lanes`, `30-schemas`,
+`40-doctrine`, `50-helpers`, `60-estimate`) and one per phase (`70-recon`, `80-documents`,
+`90-slice`, `92-implement`, `94-review`, `96-report`), and `node build.js` assembles them in
+name order into the engine. The built file stays committed, because the Workflow runtime
+takes one self-contained script and `install.sh` copies one file to a box that may have no
+node; `check.sh` now fails first when the committed engine is not what `src/` builds, so
+the two cannot drift. Each section of the built file carries a marker naming its part.
+
+Behaviour is unchanged and was checked to be: the old and the new engine were run against
+the same stubbed runtime over seven argument shapes (a fresh launch, both owner pauses with
+answers, a fully autonomous run on raised document tiers with two patch rounds, `from:'plan'`
+with a `testCmd`, `from:'spec'` with no document review, and no probe with a wave of one) and
+every one of the 87 agent calls — label, model, effort, schema and prompt text — every result
+and every log line was identical, so a run in flight resumes from cache exactly as before.
+Three repeated report shapes became one function each (`documentsReport`, `planReport`,
+`docPhase`), the owner-not-asked note the spec and plan writers share is one constant, and
+the Probe header no longer sits under the Recon one. The 81 tests pass as they were.
+
 ## v1.7.0 — 2026-09-16
 
 **The document lanes can be raised for a run where the design is the risk.** Two new args,
